@@ -4,6 +4,7 @@ Streamlit UI — DeepSeek + LangChain + Ollama + Gmail API
 """
 import logging
 import streamlit as st
+import streamlit.components.v1 as components
 from langchain_ollama import ChatOllama
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import (
@@ -23,7 +24,11 @@ from email_send.gmail_handler import (
 from email_send.intent_parser import IntentParser
 from email_send.email_composer import EmailComposer
 from email_send.contacts_manager import ContactsManager
+import json
 from email_send.send_email_workflow import render_send_email_workflow
+from email_send.inbox_workflow import render_inbox_workflow
+from email_send.search_workflow import render_search_workflow
+from email_send.delete_workflow import render_delete_workflow
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,6 +94,15 @@ st.markdown("""
     div[role="listbox"] div {
         background-color: #1e1e1e !important;
         color: #e8e8e8 !important;
+    }
+
+    /* Selectbox & dropdown clickable areas — pointer cursor */
+    .stSelectbox div[data-baseweb="select"],
+    .stSelectbox div[data-baseweb="select"] svg,
+    .stSelectbox [role="combobox"],
+    div[data-baseweb="select"] svg[title="open"],
+    div[data-baseweb="select"] svg[title="close"] {
+        cursor: pointer !important;
     }
 
     /* Spinner */
@@ -280,7 +294,9 @@ if "email_composer" not in st.session_state:
     st.session_state.email_composer = EmailComposer(model=selected_model)
 
 # ── Tabs for Chat and Email ────────────────────────────────────────────────────
-tab_chat, tab_email, tab_settings = st.tabs(["💬 Chat", "📧 Email", "⚙️ Settings"])
+tab_chat, tab_email, tab_inbox, tab_search, tab_delete, tab_settings = st.tabs([
+    "💬 Chat", "📧 Send Email", "📥 Listing", "🔍 Search", "🗑️ Delete", "⚙️ Settings"
+])
 
 # ────────────────────────────────────────────────────────────────────────────────
 # CHAT TAB
@@ -314,6 +330,24 @@ with tab_chat:
 # ────────────────────────────────────────────────────────────────────────────────
 with tab_email:
     render_send_email_workflow()
+
+# ────────────────────────────────────────────────────────────────────────────────
+# INBOX TAB
+# ────────────────────────────────────────────────────────────────────────────────
+with tab_inbox:
+    render_inbox_workflow()
+
+# ────────────────────────────────────────────────────────────────────────────────
+# SEARCH TAB
+# ────────────────────────────────────────────────────────────────────────────────
+with tab_search:
+    render_search_workflow()
+
+# ────────────────────────────────────────────────────────────────────────────────
+# DELETE TAB
+# ────────────────────────────────────────────────────────────────────────────────
+with tab_delete:
+    render_delete_workflow()
 
 # ────────────────────────────────────────────────────────────────────────────────
 # SETTINGS TAB
@@ -403,6 +437,12 @@ with tab_settings:
         else:
             st.info("No contacts saved yet")
     
+    with st.expander("🛠️ Advanced Settings", expanded=False):
+        st.info("Advanced configuration options will go here.")
+
+
+
+    
     st.divider()
     
     # LLM Model Configuration
@@ -427,3 +467,90 @@ with tab_settings:
     
     Built with: Streamlit, LangChain, Gmail API, Ollama
     """)
+
+# ────────────────────────────────────────────────────────────────────────────────
+# GLOBAL UI ENHANCEMENTS (CSS & JS for Text Inputs)
+# ────────────────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* Move 'Press Enter to apply' below the input box so it doesn't overlap our icons */
+div[data-testid="InputInstructions"] {
+    position: absolute !important;
+    bottom: -30px !important;
+    right: 0 !important;
+    font-size: 12px !important;
+    background: transparent !important;
+    color: #888 !important;
+    padding: 0 !important;
+}
+/* Ensure the parent container has enough space at the bottom */
+div[data-testid="stTextInput"] > div {
+    margin-bottom: 8px; 
+}
+</style>
+""", unsafe_allow_html=True)
+
+components.html("""
+<script>
+const parentDoc = window.parent.document;
+function addInputIcons() {
+    const textInputs = parentDoc.querySelectorAll('div[data-baseweb="input"]');
+    textInputs.forEach(wrapper => {
+        // Skip if icons already added or if it's not a text input
+        if (wrapper.querySelector('.st-custom-icons') || !wrapper.querySelector('input[type="text"]')) return;
+        
+        const iconContainer = parentDoc.createElement('div');
+        iconContainer.className = 'st-custom-icons';
+        iconContainer.style.display = 'flex';
+        iconContainer.style.gap = '8px';
+        iconContainer.style.paddingRight = '12px';
+        iconContainer.style.alignItems = 'center';
+        iconContainer.style.color = '#888';
+        
+        // Copy icon
+        const copyBtn = parentDoc.createElement('span');
+        copyBtn.innerHTML = '&#128203;'; // clipboard
+        copyBtn.style.cursor = 'pointer';
+        copyBtn.style.fontSize = '14px';
+        copyBtn.title = 'Copy text';
+        copyBtn.onclick = function(e) {
+            e.preventDefault(); e.stopPropagation();
+            const input = wrapper.querySelector('input');
+            if (input && input.value) {
+                parentDoc.defaultView.navigator.clipboard.writeText(input.value);
+                copyBtn.innerHTML = '&#10004;'; // checkmark
+                setTimeout(() => copyBtn.innerHTML = '&#128203;', 1000);
+            }
+        };
+        
+        // Clear icon
+        const clearBtn = parentDoc.createElement('span');
+        clearBtn.innerHTML = '&#10006;'; // cross
+        clearBtn.style.cursor = 'pointer';
+        clearBtn.style.fontSize = '14px';
+        clearBtn.title = 'Clear text';
+        clearBtn.onclick = function(e) {
+            e.preventDefault(); e.stopPropagation();
+            const input = wrapper.querySelector('input');
+            if (input) {
+                let nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                nativeInputValueSetter.call(input, '');
+                input.dispatchEvent(new Event('input', { bubbles: true}));
+                input.dispatchEvent(new Event('change', { bubbles: true}));
+                input.focus();
+            }
+        };
+        
+        iconContainer.appendChild(copyBtn);
+        iconContainer.appendChild(clearBtn);
+        wrapper.appendChild(iconContainer);
+        wrapper.style.paddingRight = '0px'; 
+    });
+}
+
+// Observe DOM for new inputs (Streamlit reruns)
+const observer = new MutationObserver((mutations) => { addInputIcons(); });
+observer.observe(parentDoc.body, { childList: true, subtree: true });
+addInputIcons();
+</script>
+""", height=0, width=0)

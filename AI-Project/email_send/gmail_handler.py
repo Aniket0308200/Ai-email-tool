@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.compose",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://mail.google.com/",  # Required for permanent deletion
 ]
 
 # Candidate ports to try for the OAuth callback server (in order)
@@ -400,3 +403,293 @@ def get_authenticated_email() -> str | None:
     except Exception as exc:
         logger.error("Failed to get email address: %s", exc)
     return None
+
+
+# ── Inbox message listing ─────────────────────────────────────────────────────
+
+def _parse_header(headers: list[dict], name: str) -> str:
+    """Extract a single header value from the Gmail message headers list."""
+    for header in headers:
+        if header.get("name", "").lower() == name.lower():
+            return header.get("value", "")
+    return ""
+
+
+def _parse_from(from_header: str) -> tuple[str, str]:
+    """Split a From header into (display_name, email_address)."""
+    import re as _re
+    match = _re.match(r'^\s*"?(.+?)"?\s*<([^>]+)>\s*$', from_header)
+    if match:
+        return match.group(1).strip().strip('"'), match.group(2).strip()
+    # Bare email address
+    email = from_header.strip().strip("<>")
+    return email.split("@")[0], email
+
+
+def _format_date(date_header: str) -> str:
+    """Convert an RFC-2822 date header to a friendly local string."""
+    from email.utils import parsedate_to_datetime
+    try:
+        dt = parsedate_to_datetime(date_header).astimezone()  # convert to local tz
+        return dt.strftime("%d %b %Y, %I:%M %p")
+    except Exception:
+        return date_header[:25] if date_header else "—"
+
+
+def _extract_plain_body(payload: dict) -> str:
+    """
+    Recursively walk a Gmail message payload and return the first
+    text/plain part decoded to a string.
+    """
+    mime_type = payload.get("mimeType", "")
+    body_data = payload.get("body", {}).get("data")
+
+    if mime_type == "text/plain" and body_data:
+        return base64.urlsafe_b64decode(body_data).decode("utf-8", errors="replace")
+
+    for part in payload.get("parts", []):
+        result = _extract_plain_body(part)
+        if result:
+            return result
+
+    # Fallback: try text/html and strip tags
+    if mime_type == "text/html" and body_data:
+        import re as _re
+        html = base64.urlsafe_b64decode(body_data).decode("utf-8", errors="replace")
+        return _re.sub(r"<[^>]+>", "", html).strip()
+
+    for part in payload.get("parts", []):
+        part_mime = part.get("mimeType", "")
+        part_data = part.get("body", {}).get("data")
+        if part_mime == "text/html" and part_data:
+            import re as _re
+            html = base64.urlsafe_b64decode(part_data).decode("utf-8", errors="replace")
+            return _re.sub(r"<[^>]+>", "", html).strip()
+
+    return ""
+
+
+def _truncate(text: str, max_chars: int = 150) -> str:
+    """Truncate text to max_chars, appending '...' if shortened."""
+    text = " ".join(text.split())  # collapse whitespace
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "..."
+
+
+def list_messages(max_results: int = 10, label_ids: list[str] | None = None) -> dict:
+    """
+    Fetch the most recent messages matching the given labels.
+
+    Args:
+        max_results: Number of messages to retrieve (1-50).
+        label_ids:   Gmail label IDs to filter by (e.g. ["INBOX"],
+                     ["CATEGORY_PROMOTIONS"], ["SENT"], ["DRAFT"]).
+                     Defaults to ["INBOX"] when None.
+
+    Returns:
+        dict: {"success": bool, "messages": list[dict], "error": str | None}
+        Each message dict contains:
+            id, from_name, from_email, date, subject,
+            body_preview (~150 chars), body_full, gmail_link
+    """
+    try:
+        service = authenticate_gmail()
+        max_results = max(1, min(max_results, 50))
+        if label_ids is None:
+            label_ids = ["INBOX"]
+
+        # 1. Get message IDs
+        result = (
+            service.users()
+            .messages()
+            .list(userId="me", maxResults=max_results, labelIds=label_ids)
+            .execute()
+        )
+        msg_ids = result.get("messages", [])
+
+        if not msg_ids:
+            return {"success": True, "messages": [], "total_estimate": 0, "error": None}
+
+        # 2. Fetch full details for each message
+        messages = [_fetch_and_parse_message(service, m["id"]) for m in msg_ids]
+
+        logger.info("Fetched %d inbox messages.", len(messages))
+        return {
+            "success": True,
+            "messages": messages,
+            "total_estimate": result.get("resultSizeEstimate", len(messages)),
+            "error": None,
+        }
+
+    except Exception as exc:
+        logger.error("Failed to list messages: %s", exc)
+        return {"success": False, "messages": [], "total_estimate": 0, "error": str(exc)}
+
+
+def search_messages(query: str, max_results: int = 10) -> dict:
+    """
+    Search Gmail messages using Gmail's search query syntax.
+
+    The *query* string supports the full Gmail search syntax, e.g.:
+        from:user@example.com
+        subject:invoice has:attachment
+        is:unread newer_than:7d
+        filename:pdf larger:5M
+        category:promotions
+        "exact phrase" -excluded_word
+
+    Args:
+        query:       Gmail search query string.
+        max_results: Number of messages to retrieve (1-50).
+
+    Returns:
+        dict: {"success": bool, "messages": list[dict],
+               "total_estimate": int, "query": str, "error": str | None}
+    """
+    try:
+        service = authenticate_gmail()
+        max_results = max(1, min(max_results, 50))
+
+        if not query or not query.strip():
+            return {
+                "success": False,
+                "messages": [],
+                "total_estimate": 0,
+                "query": query,
+                "error": "Search query cannot be empty.",
+            }
+
+        result = (
+            service.users()
+            .messages()
+            .list(userId="me", maxResults=max_results, q=query.strip())
+            .execute()
+        )
+        msg_ids = result.get("messages", [])
+        total_estimate = result.get("resultSizeEstimate", 0)
+
+        if not msg_ids:
+            return {
+                "success": True,
+                "messages": [],
+                "total_estimate": 0,
+                "query": query,
+                "error": None,
+            }
+
+        messages = [_fetch_and_parse_message(service, m["id"]) for m in msg_ids]
+
+        logger.info("Search '%s' returned %d messages (est. %d total).", query, len(messages), total_estimate)
+        return {
+            "success": True,
+            "messages": messages,
+            "total_estimate": total_estimate,
+            "query": query,
+            "error": None,
+        }
+
+    except Exception as exc:
+        logger.error("Search failed for query '%s': %s", query, exc)
+        return {
+            "success": False,
+            "messages": [],
+            "total_estimate": 0,
+            "query": query,
+            "error": str(exc),
+        }
+
+
+def _fetch_and_parse_message(service, msg_id: str) -> dict:
+    """Fetch a single message by ID and return a parsed dict."""
+    msg = (
+        service.users()
+        .messages()
+        .get(userId="me", id=msg_id, format="full")
+        .execute()
+    )
+
+    payload = msg.get("payload", {})
+    headers = payload.get("headers", [])
+
+    from_header = _parse_header(headers, "From")
+    from_name, from_email = _parse_from(from_header)
+    date_str = _format_date(_parse_header(headers, "Date"))
+    subject = _parse_header(headers, "Subject") or "(No Subject)"
+
+    body_full = _extract_plain_body(payload)
+    body_preview = _truncate(body_full, 150)
+
+    gmail_link = f"https://mail.google.com/mail/u/0/#inbox/{msg_id}"
+
+    return {
+        "id": msg_id,
+        "from_name": from_name,
+        "from_email": from_email,
+        "date": date_str,
+        "subject": subject,
+        "body_preview": body_preview,
+        "body_full": body_full,
+        "gmail_link": gmail_link,
+    }
+
+
+def trash_messages(msg_ids: list[str]) -> dict:
+    """Move messages to Trash (safe delete)."""
+    try:
+        service = authenticate_gmail()
+        trashed, failed = [], []
+        for msg_id in msg_ids:
+            try:
+                service.users().messages().trash(userId="me", id=msg_id).execute()
+                trashed.append(msg_id)
+            except Exception as e:
+                failed.append({"id": msg_id, "error": str(e)})
+        logger.info("Trashed %d messages (%d failed).", len(trashed), len(failed))
+        return {"success": True, "trashed_count": len(trashed),
+                "failed_count": len(failed), "failed": failed, "error": None}
+    except Exception as exc:
+        logger.error("Failed to trash messages: %s", exc)
+        return {"success": False, "trashed_count": 0,
+                "failed_count": len(msg_ids), "failed": [], "error": str(exc)}
+
+
+def untrash_messages(msg_ids: list[str]) -> dict:
+    """Restore messages from Trash."""
+    try:
+        service = authenticate_gmail()
+        restored, failed = [], []
+        for msg_id in msg_ids:
+            try:
+                service.users().messages().untrash(userId="me", id=msg_id).execute()
+                restored.append(msg_id)
+            except Exception as e:
+                failed.append({"id": msg_id, "error": str(e)})
+        logger.info("Restored %d messages (%d failed).", len(restored), len(failed))
+        return {"success": True, "restored_count": len(restored),
+                "failed_count": len(failed), "failed": failed, "error": None}
+    except Exception as exc:
+        logger.error("Failed to restore messages: %s", exc)
+        return {"success": False, "restored_count": 0,
+                "failed_count": len(msg_ids), "failed": [], "error": str(exc)}
+
+
+def delete_messages_permanently(msg_ids: list[str]) -> dict:
+    """Permanently delete messages."""
+    try:
+        service = authenticate_gmail()
+        deleted, failed = [], []
+        for msg_id in msg_ids:
+            try:
+                service.users().messages().delete(userId="me", id=msg_id).execute()
+                deleted.append(msg_id)
+            except Exception as e:
+                failed.append({"id": msg_id, "error": str(e)})
+        logger.info("Permanently deleted %d messages (%d failed).", len(deleted), len(failed))
+        return {"success": True, "deleted_count": len(deleted),
+                "failed_count": len(failed), "failed": failed, "error": None}
+    except Exception as exc:
+        logger.error("Failed to permanently delete messages: %s", exc)
+        return {"success": False, "deleted_count": 0,
+                "failed_count": len(msg_ids), "failed": [], "error": str(exc)}
+
