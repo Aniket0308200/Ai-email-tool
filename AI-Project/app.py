@@ -25,6 +25,13 @@ from email_send.inbox_workflow import render_inbox_workflow
 from email_send.search_workflow import render_search_workflow
 from email_send.delete_workflow import render_delete_workflow
 
+# Slack workflows
+from slack.send_message_workflow import render_send_message_workflow
+from slack.channels_workflow import render_channels_workflow
+from slack.search_workflow import render_search_workflow as render_slack_search_workflow
+from slack.delete_workflow import render_delete_workflow as render_slack_delete_workflow
+from slack.settings_workflow import render_settings_workflow as render_slack_settings_workflow
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
@@ -301,7 +308,7 @@ if "current_view" not in st.session_state:
     st.session_state.current_view = "chat"
 
 st.markdown("### ⚙️ Tools")
-col_nav1, col_nav2, col_spacer = st.columns([0.12, 0.12, 0.76], gap="small")
+col_nav1, col_nav2, col_nav3, col_spacer = st.columns([0.12, 0.12, 0.12, 0.64], gap="small")
 
 with col_nav1:
     st.markdown('<div class="nav-btn">', unsafe_allow_html=True)
@@ -314,6 +321,13 @@ with col_nav2:
     st.markdown('<div class="nav-btn">', unsafe_allow_html=True)
     if st.button("📧 Gmail", key="nav_email_btn"):
         st.session_state.current_view = "email"
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with col_nav3:
+    st.markdown('<div class="nav-btn">', unsafe_allow_html=True)
+    if st.button("💬 Slack", key="nav_slack_btn"):
+        st.session_state.current_view = "slack"
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -400,6 +414,27 @@ elif st.session_state.current_view == "email":
                         if st.button("🗑️", key=f"del_{name}"):
                             st.session_state.contacts_manager.remove_contact(name)
                             st.rerun()
+
+elif st.session_state.current_view == "slack":
+    st.divider()
+    tab_slack_send, tab_slack_channels, tab_slack_search, tab_slack_delete, tab_slack_settings = st.tabs([
+        "📨 Send Message", "📋 Channels", "🔍 Search", "🗑️ Delete", "⚙️ Settings"
+    ])
+
+    with tab_slack_send:
+        render_send_message_workflow()
+
+    with tab_slack_channels:
+        render_channels_workflow()
+
+    with tab_slack_search:
+        render_slack_search_workflow()
+
+    with tab_slack_delete:
+        render_slack_delete_workflow()
+
+    with tab_slack_settings:
+        render_slack_settings_workflow()
 
 st.markdown("""
 <style>
