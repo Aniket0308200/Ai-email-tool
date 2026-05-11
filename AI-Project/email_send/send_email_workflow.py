@@ -55,7 +55,7 @@ def render_send_email_workflow():
 def _apply_pending_state_changes():
     """Apply widget state changes before widgets are instantiated."""
     if st.session_state.pop("reset_email_form", False):
-        st.session_state.recipient_input = ""
+        st.session_state.recipients = [""]
         st.session_state.subject_context = ""
         st.session_state.additional_context = ""
         st.session_state.email_tone = "Nothing"
@@ -63,9 +63,18 @@ def _apply_pending_state_changes():
         st.session_state.generated_body = ""
         st.session_state.preview_editing = False
 
+    # Quick-contact button appends to the recipients list
     pending_recipient = st.session_state.pop("pending_recipient_input", None)
     if pending_recipient is not None:
-        st.session_state.recipient_input = pending_recipient
+        if "recipients" not in st.session_state:
+            st.session_state.recipients = [pending_recipient]
+        else:
+            # Fill the first empty slot, or add a new one
+            try:
+                empty_idx = st.session_state.recipients.index("")
+                st.session_state.recipients[empty_idx] = pending_recipient
+            except ValueError:
+                st.session_state.recipients.append(pending_recipient)
 
     sent_message = st.session_state.pop("email_sent_message", None)
     if sent_message:
@@ -81,6 +90,7 @@ def _init_session_defaults():
     defaults = {
         "email_history": [],
         "draft_history": [],
+        "recipients": [""],         # list of recipient strings (name or email)
         "generated_subject": "",
         "generated_body": "",
         "preview_editing": False,   # True while the user is editing the preview
@@ -117,12 +127,41 @@ def _render_compose_section() -> tuple[str, str, str, str]:
     with col1:
         st.subheader("1. Compose Email")
 
-        recipient_input = st.text_input(
-            "Recipient (name or email)",
-            placeholder="e.g., rahul@example.com or Rahul",
-            key="recipient_input",
+        # ── Dynamic multi-recipient inputs ─────────────────────────────────
+        st.markdown("**Recipients (name or email)**")
+
+        if "recipients" not in st.session_state or not st.session_state.recipients:
+            st.session_state.recipients = [""]
+
+        recipients: list[str] = st.session_state.recipients
+
+        for i in range(len(recipients)):
+            r_col, del_col = st.columns([9, 1])
+            with r_col:
+                recipients[i] = st.text_input(
+                    f"Recipient {i + 1}",
+                    value=recipients[i],
+                    placeholder="e.g., rahul@example.com or Rahul",
+                    key=f"recipient_{i}",
+                    label_visibility="collapsed",
+                )
+            with del_col:
+                # Only show remove button when there is more than one row
+                if len(recipients) > 1:
+                    if st.button("🗑", key=f"remove_recipient_{i}", help="Remove this recipient"):
+                        st.session_state.recipients.pop(i)
+                        st.rerun()
+
+        if st.button("➕ Add Recipient", key="add_recipient_btn"):
+            st.session_state.recipients.append("")
+            st.rerun()
+
+        # Collect the non-empty recipient values after widget rendering
+        recipient_input = ", ".join(
+            r.strip() for r in st.session_state.recipients if r.strip()
         )
 
+        # ── Other compose fields ───────────────────────────────────────────
         subject_context = st.text_input(
             "What is this email about?",
             placeholder="Write the message you want to send",
@@ -150,7 +189,7 @@ def _render_compose_section() -> tuple[str, str, str, str]:
 
 
 def _render_quick_contacts():
-    """Render recent contacts for quickly filling the recipient."""
+    """Render recent contacts for quickly adding them to the recipients list."""
     st.subheader("Quick Contacts")
 
     contacts = st.session_state.contacts_manager.get_all_contacts()
@@ -159,8 +198,9 @@ def _render_quick_contacts():
         return
 
     st.write("**Recent Contacts:**")
+    st.caption("Click to add to recipients list")
     for name, email in list(contacts.items())[:5]:
-        if st.button(f"Use {name}", key=f"contact_{name}"):
+        if st.button(f"➕ {name}", key=f"contact_{name}"):
             st.session_state.pending_recipient_input = email
             st.rerun()
 
@@ -368,15 +408,28 @@ def _handle_send_email(
 
 
 def _resolve_and_validate(recipient_input: str) -> str | None:
-    """Resolve name → email and validate. Returns email or None on failure."""
-    resolved = st.session_state.email_composer.resolve_recipient_name_to_email(
-        recipient_input,
-        st.session_state.contacts_manager.get_all_contacts(),
-    )
-    if not st.session_state.email_composer.validate_email_address(resolved):
-        st.error(f"Invalid email address: {resolved}")
+    """
+    Resolve each name/email in the comma-separated recipient_input,
+    validate all of them, and return a comma-separated string of
+    resolved emails, or None if any address is invalid.
+    """
+    contacts = st.session_state.contacts_manager.get_all_contacts()
+    composer  = st.session_state.email_composer
+
+    raw_list = [r.strip() for r in recipient_input.split(",") if r.strip()]
+    if not raw_list:
+        st.error("Please add at least one recipient.")
         return None
-    return resolved
+
+    resolved_list = []
+    for raw in raw_list:
+        resolved = composer.resolve_recipient_name_to_email(raw, contacts)
+        if not composer.validate_email_address(resolved):
+            st.error(f"Invalid email address: {resolved}")
+            return None
+        resolved_list.append(resolved)
+
+    return ", ".join(resolved_list)
 
 
 # ── Preview section (generated email) ─────────────────────────────────────────
