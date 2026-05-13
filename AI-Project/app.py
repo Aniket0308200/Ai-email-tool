@@ -417,14 +417,14 @@ elif st.session_state.current_view == "email":
 
 elif st.session_state.current_view == "slack":
     st.divider()
-    tab_slack_send, tab_slack_channels, tab_slack_search, tab_slack_delete, tab_slack_settings = st.tabs([
-        "📨 Send Message", "📋 Channels", "🔍 Search", "🗑️ Delete", "⚙️ Settings"
+    tab_slack_send, tab_slack_listing, tab_slack_search, tab_slack_delete, tab_slack_settings = st.tabs([
+        "📨 Send Message", "📋 Listing", "🔍 Search", "🗑️ Delete", "⚙️ Settings"
     ])
 
     with tab_slack_send:
         render_send_message_workflow()
 
-    with tab_slack_channels:
+    with tab_slack_listing:
         render_channels_workflow()
 
     with tab_slack_search:
