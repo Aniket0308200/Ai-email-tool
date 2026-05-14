@@ -1,345 +1,718 @@
+﻿import re
 import streamlit as st
 from datetime import datetime
 from notion.notion_handler import (
-    is_notion_authenticated,
-    get_notion_auth_url,
-    exchange_code_for_token,
-    create_notion_page,
-    get_authenticated_user,
-    clear_authentication,
-    _load_config,
-    _save_config,
-    generate_page_content,
-    refine_direct_content,
+    is_notion_authenticated, get_notion_auth_url, exchange_code_for_token,
+    create_notion_page, get_authenticated_user, clear_authentication,
+    _load_config, _save_config, generate_page_content, refine_direct_content,
+    get_existing_pages,
 )
-from notion.intent_parser import NotionIntentParser
-from notion.workflow_planner import NotionWorkflowPlanner
 
-# ── Dropdown option definitions ────────────────────────────────────────────────
 FORMATTING_OPTIONS = {
-    "Text Formatting": [
-        "Text", "Bold", "Italic", "Underline", "Strikethrough",
-        "Inline Code", "Text Color", "Background Color (Highlight)",
-        "Equations (Math)", "Comments",
-    ],
-    "Basic Blocks": [
-        "Heading 1", "Heading 2", "Heading 3",
-        "Bullet List", "Numbered List", "To-do List (Checklist)",
-        "Toggle List", "Quote", "Callout", "Divider",
-        "Table (Simple)", "Table of Contents",
-    ],
-    "Media & Files": [
-        "Image", "Video", "Audio", "File", "Web Bookmark", "Code Block",
-        "YouTube Embed", "Google Drive Embed", "PDF Embed",
-        "Maps Embed", "Tally Form",
-    ],
-    "Databases & Views": [
-        "Table View", "Board View (Kanban)", "Gallery View",
-        "List View", "Calendar View", "Timeline View",
-    ],
-    "Advanced & Interactive": [
-        "Synced Block", "Columns", "Button", "Template Button",
-        "Breadcrumb",
-    ],
+    "Text Formatting": ["Text","Bold","Italic","Underline","Strikethrough","Inline Code","Text Color","Background Color (Highlight)","Equations (Math)","Comments"],
+    "Basic Blocks": ["Heading 1","Heading 2","Heading 3","Bullet List","Numbered List","To-do List (Checklist)","Toggle List","Quote","Callout","Divider","Table (Simple)","Table of Contents"],
+    "Media & Files": ["Image","Video","Audio","File","Web Bookmark","Code Block","YouTube Embed","Google Drive Embed","PDF Embed","Maps Embed","Tally Form"],
+    "Databases & Views": ["Table View","Board View (Kanban)","Gallery View","List View","Calendar View","Timeline View"],
+    "Advanced & Interactive": ["Synced Block","Columns","Button","Template Button","Breadcrumb"],
 }
 
-# All options that need a URL or file input
-MEDIA_UPLOAD_OPTIONS = {
-    "Image", "Video", "Audio", "File", "Web Bookmark",
-    "YouTube Embed", "Google Drive Embed", "PDF Embed",
-    "Maps Embed", "Tally Form",
+MEDIA_NEEDS_INPUT = {"Image","Video","Audio","File","Web Bookmark","YouTube Embed","Google Drive Embed","PDF Embed","Maps Embed","Tally Form","Button"}
+URL_ONLY = {"YouTube Embed","Google Drive Embed","PDF Embed","Maps Embed","Tally Form","Web Bookmark"}
+MEDIA_PLACEHOLDERS = {
+    "Image":"https://example.com/image.png","Video":"https://example.com/video.mp4",
+    "Audio":"https://example.com/audio.mp3","File":"https://example.com/doc.pdf",
+    "Web Bookmark":"https://example.com","YouTube Embed":"https://www.youtube.com/watch?v=...",
+    "Google Drive Embed":"https://drive.google.com/file/d/...","PDF Embed":"https://example.com/doc.pdf",
+    "Maps Embed":"https://maps.google.com/...","Tally Form":"https://tally.so/r/...","Button":"https://example.com/action",
 }
 
-# Options that only need a URL (no file upload)
-URL_ONLY_OPTIONS = {
-    "YouTube Embed", "Google Drive Embed", "PDF Embed",
-    "Maps Embed", "Tally Form", "Web Bookmark",
-}
-
-# Placeholder text per media type
-MEDIA_URL_PLACEHOLDERS = {
-    "Image":              "https://example.com/image.png",
-    "Video":              "https://example.com/video.mp4",
-    "Audio":              "https://example.com/audio.mp3",
-    "File":               "https://example.com/document.pdf",
-    "Web Bookmark":       "https://example.com",
-    "YouTube Embed":      "https://www.youtube.com/watch?v=...",
-    "Google Drive Embed": "https://drive.google.com/file/d/...",
-    "PDF Embed":          "https://example.com/document.pdf",
-    "Maps Embed":         "https://maps.google.com/...",
-    "Tally Form":         "https://tally.so/r/...",
-}
-
-# Mapping from dropdown selection → markdown/block hint for the AI
 BLOCK_HINT_MAP = {
-    "Bold":                     "Use **bold** text for key terms and important phrases.",
-    "Italic":                   "Use *italic* text for emphasis and definitions.",
-    "Underline":                "Emphasize important words (use bold as Notion proxy).",
-    "Strikethrough":            "Use ~~strikethrough~~ for deprecated or removed items.",
-    "Inline Code":              "Use `inline code` for technical terms, commands, and values.",
-    "Text Color":               "Use colored text annotations for visual hierarchy.",
-    "Background Color (Highlight)": "Use >> callout blocks to highlight key information.",
-    "Equations (Math)":         "Include relevant mathematical equations using $...$ syntax.",
-    "Comments":                 "Add > quote blocks as inline commentary and notes.",
-    "Heading 1":                "Use # Heading 1 for the main page title section.",
-    "Heading 2":                "Use ## Heading 2 for major sections.",
-    "Heading 3":                "Use ### Heading 3 for subsections.",
-    "Bullet List":              "Use - bullet lists for unordered items and features.",
-    "Numbered List":            "Use 1. numbered lists for ordered steps and sequences.",
-    "To-do List (Checklist)":   "Use - [ ] checkboxes for tasks and action items.",
-    "Toggle List":              "Use >? toggle blocks for collapsible details.",
-    "Quote":                    "Use > quote blocks for important statements and references.",
-    "Callout":                  "Use >> callout blocks with emoji for tips, warnings, and highlights.",
-    "Divider":                  "Use --- dividers to separate major sections visually.",
-    "Table (Simple)":           "Include a | table | with headers for structured data.",
-    "Table of Contents":        "Start with a structured overview of all sections.",
-    "Code Block":               "Use ```language code blocks for all code samples.",
-    "Table View":               "Structure data as a table with rows and columns.",
-    "Board View (Kanban)":      "Organize content into status columns: To Do, In Progress, Done.",
-    "Gallery View":             "Present items as a visual card-based gallery layout.",
-    "List View":                "Present items as a clean structured list.",
-    "Calendar View":            "Include dates and schedule information in the content.",
-    "Timeline View":            "Include a timeline or chronological sequence of events.",
-    "Synced Block":             "Note that this content block should be synced across pages.",
-    "Columns":                  "Organize content into side-by-side column sections.",
-    "Button":                   "Include actionable button-style call-to-action items.",
-    "Breadcrumb":               "Include a navigation breadcrumb at the top.",
-    "YouTube Embed":            "Include a YouTube video embed placeholder.",
-    "Google Drive Embed":       "Include a Google Drive file embed placeholder.",
-    "Maps Embed":               "Include a map embed placeholder with location details.",
-    "PDF Embed":                "Include a PDF document embed placeholder.",
-    "Tally Form":               "Include a form/survey embed placeholder.",
+    "Bold":"Use **bold** text for key terms.","Italic":"Use *italic* for emphasis.",
+    "Underline":"Emphasize important words (bold as proxy).","Strikethrough":"Use ~~strikethrough~~ for removed items.",
+    "Inline Code":"Use `inline code` for technical terms.","Text Color":"Use colored text for visual hierarchy.",
+    "Background Color (Highlight)":"Use >> callout blocks to highlight key info.",
+    "Equations (Math)":"Include math equations using $...$ syntax.","Comments":"Add > quote blocks as commentary.",
+    "Heading 1":"Use # Heading 1 for main title section.","Heading 2":"Use ## Heading 2 for major sections.",
+    "Heading 3":"Use ### Heading 3 for subsections.","Bullet List":"Use - bullet lists for unordered items.",
+    "Numbered List":"Use 1. numbered lists for ordered steps.","To-do List (Checklist)":"Use - [ ] checkboxes for tasks.",
+    "Toggle List":"Use >? toggle blocks for collapsible details.","Quote":"Use > quote blocks for statements.",
+    "Callout":"Use >> callout blocks with emoji for tips/warnings.","Divider":"Use --- dividers between sections.",
+    "Table (Simple)":"Include a | table | with headers.","Table of Contents":"Start with a structured overview.",
+    "Code Block":"Use ```language code blocks.","Table View":"Structure data as a table.",
+    "Board View (Kanban)":"Organize into status columns: To Do, In Progress, Done.",
+    "Gallery View":"Present items as a visual card gallery.","List View":"Present items as a clean list.",
+    "Calendar View":"Include dates and schedule info.","Timeline View":"Include a chronological sequence.",
+    "Synced Block":"Note this block should be synced.","Columns":"Organize into side-by-side columns.",
+    "Button":"Include an actionable button call-to-action.","Breadcrumb":"Include a navigation breadcrumb.",
+    "YouTube Embed":"Include a YouTube video embed.","Google Drive Embed":"Include a Google Drive embed.",
+    "Maps Embed":"Include a map embed.","PDF Embed":"Include a PDF embed.","Tally Form":"Include a form embed.",
 }
 
-
-# ── Session state defaults ─────────────────────────────────────────────────────
 def _init_state():
     defaults = {
-        "notion_workflow_state":  "idle",
-        "notion_current_plan":    [],
-        "notion_parsed_intent":   None,
-        "last_notion_result":     None,
-        "notion_page_history":    [],
-        "notion_preview_content": "",
-        "notion_preview_title":   "",
-        "notion_is_editing":      False,
-        "notion_form_version":    0,
-        "notion_media_items":     [],   # list of {type, source, url_or_path}
+        "notion_workflow_state":"idle","notion_current_plan":[],"notion_parsed_intent":None,
+        "last_notion_result":None,"notion_page_history":[],"notion_preview_content":"",
+        "notion_preview_title":"","notion_is_editing":False,"notion_form_version":0,
+        "notion_media_items":[],"notion_confirm_cancel":False,
+        "notion_fmt_applied":False,"notion_fmt_selections":{},
+        "notion_parent_mode":"new_page","notion_selected_parent_id":None,
+        "notion_selected_parent_name":"","notion_parent_selection_mode":False,
+        "notion_confirm_cancel_parent":False,"notion_parent_selected":False,
     }
-    for k, v in defaults.items():
+    for k,v in defaults.items():
         if k not in st.session_state:
-            st.session_state[k] = v
+            st.session_state[k]=v
+
+def _reset_form():
+    st.session_state.notion_workflow_state="idle"
+    st.session_state.notion_current_plan=[]
+    st.session_state.notion_parsed_intent=None
+    st.session_state.last_notion_result=None
+    st.session_state.notion_preview_title=""
+    st.session_state.notion_preview_content=""
+    st.session_state.notion_is_editing=False
+    st.session_state.notion_media_items=[]
+    st.session_state.notion_confirm_cancel=False
+    st.session_state.notion_fmt_applied=False
+    st.session_state.notion_fmt_selections={}
+    st.session_state.notion_parent_mode="new_page"
+    st.session_state.notion_selected_parent_id=None
+    st.session_state.notion_selected_parent_name=""
+    st.session_state.notion_parent_selection_mode=False
+    st.session_state.notion_confirm_cancel_parent=False
+    st.session_state.notion_parent_selected=False
+    st.session_state.notion_form_version+=1
 
 
-# ── Main renderer ──────────────────────────────────────────────────────────────
+def _build_media_blocks(media_items: list, position: str = "end") -> str:
+    """
+    Convert queued media items into proper block syntax.
+    position: 'end' = append at end, 'inline' = caller handles placement.
+
+    Notion API limitations:
+    - Images: only external HTTPS URLs work. Local uploads cannot be embedded.
+    - Videos: external URLs including YouTube work via video block.
+    - Embeds: Google Drive, Maps, Tally, PDF use embed block.
+    """
+    if not media_items:
+        return ""
+    lines = []
+    if position == "end":
+        lines += ["---", "## 📎 Media & Attachments", ""]
+
+    for item in media_items:
+        t   = item["type"]
+        v   = item["value"]
+        src = item["source"]
+
+        if t == "Image":
+            if src == "url" and v.startswith("http"):
+                lines.append(f"![Image]({v})")
+            else:
+                lines.append(f"> 🖼️ Image `{v}` — host it externally (https://...) to embed in Notion")
+
+        elif t == "Video":
+            if src == "url":
+                lines.append(f"{{video:{v}}}")
+            else:
+                lines.append(f"> 🎬 Video `{v}` — host externally to embed")
+
+        elif t == "YouTube Embed":
+            lines.append(f"{{video:{v}}}")
+
+        elif t in ("Google Drive Embed", "PDF Embed", "Maps Embed", "Tally Form"):
+            lines.append(f"{{embed:{v}}}")
+
+        elif t == "Web Bookmark":
+            lines.append(f"> 🔖 Bookmark: [{v}]({v})")
+
+        elif t == "Audio":
+            if src == "url":
+                lines.append(f"> 🎵 Audio: [{v}]({v})")
+            else:
+                lines.append(f"> 🎵 Audio `{v}`")
+
+        elif t == "File":
+            lines.append(f"> 📄 File: {v}")
+
+        elif t == "Button":
+            parts = v.split("|", 1)
+            label = parts[0] if parts else "Click Here"
+            url   = parts[1] if len(parts) > 1 else "#"
+            lines.append(f"{{button:{label}|{url}}}")
+
+        else:
+            lines.append(f"> 🔗 {t}: [{v}]({v})")
+
+    return "\n".join(lines)
+
+
+def _render_rich_preview(content: str):
+    """Render preview with images, video, embeds, audio, buttons all visible."""
+    if not content:
+        st.caption("*(no content)*")
+        return
+
+    lines = content.split("\n")
+    md_buf = []
+
+    def flush():
+        if md_buf:
+            st.markdown("\n".join(md_buf))
+            md_buf.clear()
+
+    for line in lines:
+        s = line.strip()
+
+        # Image
+        m = re.match(r"!\[([^\]]*)\]\(([^)]+)\)", s)
+        if m:
+            flush()
+            url = m.group(2)
+            alt = m.group(1) or "Image"
+            if url.startswith("http"):
+                try:
+                    st.image(url, caption=alt, use_container_width=False, width=480)
+                except Exception:
+                    st.markdown(f"🖼️ [Image: {alt}]({url})")
+            else:
+                st.info(f"🖼️ Local image `{url}` — will appear in Notion only if hosted externally.")
+            continue
+
+        # Video / YouTube
+        m = re.match(r"\{video:(.+)\}", s)
+        if m:
+            flush()
+            url = m.group(1).strip()
+            try:
+                st.video(url)
+            except Exception:
+                st.markdown(f"🎬 [Video]({url})")
+            continue
+
+        # Embed
+        m = re.match(r"\{embed:(.+)\}", s)
+        if m:
+            flush()
+            url = m.group(1).strip()
+            st.markdown(
+                f"<div style='background:rgba(108,99,255,0.08);border:1px solid rgba(108,99,255,0.3);"
+                f"border-radius:8px;padding:10px 14px;margin:6px 0'>"
+                f"🔗 <b>Embed:</b> <a href='{url}' target='_blank'>{url}</a></div>",
+                unsafe_allow_html=True)
+            continue
+
+        # Button
+        m = re.match(r"\{button:(.+)\|(.+)\}", s)
+        if m:
+            flush()
+            label = m.group(1).strip()
+            url   = m.group(2).strip()
+            st.markdown(
+                f"<a href='{url}' target='_blank' style='display:inline-block;"
+                f"background:linear-gradient(135deg,#6c63ff,#8b5cf6);color:white;"
+                f"padding:8px 22px;border-radius:6px;font-weight:600;text-decoration:none;"
+                f"margin:6px 0'>{label}</a>",
+                unsafe_allow_html=True)
+            continue
+
+        # Audio
+        m = re.match(r">\s*🎵\s*Audio:\s*\[([^\]]+)\]\(([^)]+)\)", s)
+        if m:
+            flush()
+            url = m.group(2)
+            try:
+                st.audio(url)
+            except Exception:
+                st.markdown(f"🎵 [Audio]({url})")
+            continue
+
+        md_buf.append(line)
+
+    flush()
+
+
+def _render_page_card(rec: dict, idx: int, show_raw: bool = False):
+    st.markdown(
+        "<div style='background:linear-gradient(135deg,rgba(108,99,255,0.08),rgba(167,139,250,0.04));"
+        "border:1px solid rgba(108,99,255,0.28);border-radius:12px;padding:18px 22px;margin-bottom:10px'>",
+        unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"**📄 Title:** {rec['title']}")
+        st.markdown(f"**📁 Created in:** {rec['parent_name']}")
+    with c2:
+        st.markdown(f"**🕐 Created at:** {rec.get('created_at','—')}")
+        st.markdown(f"**🔗 Link:** [Open in Notion]({rec['url']})")
+    if rec.get("content"):
+        st.markdown("**📝 Content written:**")
+        st.text_area("", value=rec["content"], height=160, disabled=True,
+                     key=f"notion_card_{idx}_{rec.get('created_at',idx)}", label_visibility="collapsed")
+    else:
+        st.caption("No content body — page created with title only.")
+    st.markdown("</div>", unsafe_allow_html=True)
+    if show_raw:
+        with st.expander("📦 Raw API Response"):
+            st.json(rec["data"])
+
+
+def _render_history():
+    history = st.session_state.get("notion_page_history", [])
+    if not history:
+        return
+    st.divider()
+    st.subheader(f"📜 Page Creation History ({len(history)} page(s))")
+    st.caption("All pages created in this session — newest first.")
+    c1, _ = st.columns([1, 5])
+    with c1:
+        if st.button("🗑️ Clear History", key="clear_notion_history"):
+            st.session_state.notion_page_history = []
+            st.rerun()
+    for i, rec in enumerate(reversed(history)):
+        real_idx = len(history) - 1 - i
+        with st.expander(f"{i+1}. {rec['title']}  —  {rec.get('created_at','')}", expanded=(i==0)):
+            _render_page_card(rec, idx=real_idx, show_raw=False)
+
+
 def render_notion_workflow():
     st.markdown('<div class="page-title">📝 Notion AI Agent</div>', unsafe_allow_html=True)
 
-    # Handle OAuth callback
-    query_params = st.query_params
-    if "code" in query_params:
-        code = query_params["code"]
+    # OAuth callback
+    if "code" in st.query_params:
+        code = st.query_params["code"]
         with st.spinner("🔗 Completing Notion connection..."):
             if exchange_code_for_token(code):
                 st.success("✅ Notion connected successfully!")
                 st.query_params.clear()
                 st.rerun()
             else:
-                st.error("❌ Failed to connect Notion. Check your credentials.")
+                st.error("❌ Failed to connect Notion.")
 
     tab_agent, tab_settings = st.tabs(["🤖 Create Page", "⚙️ Settings"])
 
-    # ── Settings tab ───────────────────────────────────────────────────────────
+    # ── Settings ───────────────────────────────────────────────────────────────
     with tab_settings:
         with st.expander("📖 Setup Guide", expanded=False):
             st.markdown("""
-            Go to **[Notion Developers](https://www.notion.so/my-integrations)** → **Developer Portal**.
-
-            1. Click **"New Connection"** → fill in the name, select **OAuth**, choose workspace.
-            2. Set **Redirect URL** to `http://localhost:8501`.
-            3. Click **Create Connection** — go to **Connections** in the left sidebar.
-            4. Copy the **Client ID** and **Client Secret**.
+            Go to **[Notion Developers](https://www.notion.so/my-integrations)** → Developer Portal.
+            1. New Connection → OAuth → set Redirect URL to `http://localhost:8501`.
+            2. Copy **Client ID** and **Client Secret**.
             """)
-
         st.subheader("🔐 Notion API Configuration")
-        config = _load_config()
-        new_client_id     = st.text_input("Client ID",     value=config.get("client_id", ""))
-        new_client_secret = st.text_input("Client Secret", value=config.get("client_secret", ""), type="password")
-        new_redirect_uri  = st.text_input("Redirect URL",  value=config.get("redirect_uri", "http://localhost:8501"))
-
+        cfg = _load_config()
+        cid  = st.text_input("Client ID",     value=cfg.get("client_id",""))
+        csec = st.text_input("Client Secret", value=cfg.get("client_secret",""), type="password")
+        ruri = st.text_input("Redirect URL",  value=cfg.get("redirect_uri","http://localhost:8501"))
         if st.button("💾 Save Configuration", key="save_notion_config"):
-            _save_config({
-                "client_id":     new_client_id,
-                "client_secret": new_client_secret,
-                "redirect_uri":  new_redirect_uri,
-            })
-            st.success("✅ Configuration saved!")
+            _save_config({"client_id":cid,"client_secret":csec,"redirect_uri":ruri})
+            st.success("✅ Saved!")
             st.rerun()
-
         st.divider()
         st.subheader("👤 Connection Status")
         if is_notion_authenticated():
             st.success(f"✅ Connected as: {get_authenticated_user()}")
-            if st.button("🔓 Disconnect Notion", key="disconnect_notion"):
-                clear_authentication()
-                st.rerun()
+            if st.button("🔓 Disconnect", key="disconnect_notion"):
+                clear_authentication(); st.rerun()
         else:
-            st.info("Notion is not connected.")
+            st.info("Not connected.")
             auth_url = get_notion_auth_url()
             if auth_url:
                 st.link_button("🔓 Connect Notion", auth_url, use_container_width=True)
             else:
-                st.warning("Please configure Client ID and Redirect URL first.")
+                st.warning("Configure Client ID and Redirect URL first.")
 
     # ── Agent tab ──────────────────────────────────────────────────────────────
     with tab_agent:
         if not is_notion_authenticated():
-            st.warning("⚠️ Please connect your Notion account in the Settings tab first.")
+            st.warning("⚠️ Connect your Notion account in Settings first.")
             return
 
         _init_state()
-
-        st.write("Compose your page using direct text, AI generation, or both. "
-                 "Use the formatting dropdowns to guide the AI's structure.")
-
         version = st.session_state.notion_form_version
 
-        # ── Page title ─────────────────────────────────────────────────────────
-        page_title = st.text_input(
-            "📄 Page Title",
-            placeholder="e.g. Project Research",
-            key=f"notion_title_input_{version}",
-        )
 
-        # ── Content inputs ─────────────────────────────────────────────────────
-        direct_text_val = st.session_state.get(f"notion_direct_input_{version}", "").strip()
-        ai_text_val     = st.session_state.get(f"notion_ai_input_{version}", "").strip()
 
-        col1, col2 = st.columns(2)
-        with col1:
-            direct_content = st.text_area(
-                "✍️ Direct Content",
-                placeholder="Enter text to keep as-is (AI will still format it)…",
-                key=f"notion_direct_input_{version}",
-                height=140,
-                disabled=(ai_text_val != ""),
-            )
-        with col2:
-            ai_prompt = st.text_area(
-                "🤖 AI Generation Prompt",
+        parent_selected = st.session_state.notion_parent_selected
+        parent_mode = st.session_state.notion_parent_mode
+        selection_mode = st.session_state.notion_parent_selection_mode
+
+        # 1. Header Instruction / Status Line
+        if not parent_selected:
+            st.markdown(
+                f"<div style='background:rgba(255,193,7,0.1);border:1px solid rgba(255,193,7,0.3);"
+                f"border-radius:10px;padding:12px 18px;margin-bottom:16px;color:#ffc107;font-size:14px;font-weight:500'>"
+                f"⚠️ Please select a page type: New or Existing, then fill the input box.</div>",
+                unsafe_allow_html=True)
+        elif not selection_mode:
+            # Blue status line after selection is fully confirmed or New Page is selected
+            text = "Create a New Page" if parent_mode == "new_page" else f"Create a new page in the {st.session_state.notion_selected_parent_name} page"
+            
+            sc1, sc2 = st.columns([5, 1])
+            with sc1:
+                st.markdown(
+                    f"<div style='background:rgba(108,99,255,0.12);border:1px solid rgba(108,99,255,0.3);"
+                    f"border-radius:10px;padding:12px 18px;color:#a78bfa;font-weight:600;font-size:14px'>"
+                    f"✅ {text}</div>", unsafe_allow_html=True)
+            with sc2:
+                if st.button("Cancel", key="cancel_selection_status", use_container_width=True):
+                    st.session_state.notion_confirm_cancel_parent = True
+                    st.rerun()
+        else:
+            # Blue status line while selecting existing page
+            sc1, sc2 = st.columns([5, 1])
+            with sc1:
+                st.markdown(
+                    f"<div style='background:rgba(108,99,255,0.12);border:1px solid rgba(108,99,255,0.3);"
+                    f"border-radius:10px;padding:12px 18px;color:#a78bfa;font-weight:600;font-size:14px'>"
+                    f"🔍 Selecting Existing Page...</div>", unsafe_allow_html=True)
+            with sc2:
+                if st.button("Cancel", key="cancel_selection_picking", use_container_width=True):
+                    st.session_state.notion_confirm_cancel_parent = True
+                    st.rerun()
+
+        # 2. Selection Buttons (only when nothing selected)
+        if not parent_selected:
+            btn_col1, btn_col2 = st.columns(2)
+            with btn_col1:
+                if st.button("Create New Page", key="select_new_page", use_container_width=True):
+                    st.session_state.notion_parent_selected = True
+                    st.session_state.notion_parent_mode = "new_page"
+                    st.session_state.notion_selected_parent_id = None
+                    st.session_state.notion_selected_parent_name = ""
+                    st.rerun()
+            with btn_col2:
+                if st.button("Create in Existing Page", key="select_existing_page", use_container_width=True):
+                    st.session_state.notion_parent_selected = True
+                    st.session_state.notion_parent_mode = "existing_page"
+                    st.session_state.notion_parent_selection_mode = True
+                    st.rerun()
+
+        # 3. Existing Page Selection UI
+        if parent_selected and parent_mode == "existing_page" and selection_mode:
+            st.divider()
+            with st.spinner("📂 Fetching your Notion pages…"):
+                result = get_existing_pages()
+            
+            if not result.get("success"):
+                st.error(f"❌ Could not fetch pages: {result.get('error')}")
+                if st.button("↩️ Back to Options", key="back_to_options"):
+                    st.session_state.notion_parent_selection_mode = False
+                    st.session_state.notion_parent_selected = False
+                    st.rerun()
+            else:
+                pages = result.get("pages", [])
+                if not pages:
+                    st.info("📭 No existing pages found in your Notion workspace.")
+                    if st.button("↩️ Back to Options", key="back_no_pages"):
+                        st.session_state.notion_parent_selection_mode = False
+                        st.session_state.notion_parent_selected = False
+                        st.rerun()
+                else:
+                    st.caption(f"Select one of your {len(pages)} pages")
+                    
+
+                    page_options = {p["title"]: p["id"] for p in pages}
+                    selected_title = st.selectbox(
+                        "Choose a page:",
+                        options=list(page_options.keys()),
+                        key=f"page_selector_{version}",
+                        label_visibility="collapsed"
+                    )
+                    
+                    if selected_title:
+                        selected_id = page_options[selected_title]
+                        
+                        # Page selection area and the line showing "✅ Selected: ..." with OK button
+                        c1, c2 = st.columns([9, 1.2])
+                        with c1:
+                            st.markdown(
+                                f"<div style='background:rgba(106,170,100,0.12);border:1px solid rgba(106,170,100,0.4);"
+                                f"border-radius:8px;padding:0 16px;color:#6ee7b7;font-weight:500;height:48px;display:flex;align-items:center'>"
+                                f"✅ <b>Selected:</b> {selected_title}</div>", unsafe_allow_html=True)
+                        with c2:
+                            # Custom styled button with matching height
+                            st.markdown('<div class="custom-button-container">', unsafe_allow_html=True)
+                            if st.button("OK", key="confirm_parent_ok", use_container_width=True):
+                                st.session_state.notion_selected_parent_id = selected_id
+                                st.session_state.notion_selected_parent_name = selected_title
+                                st.session_state.notion_parent_selection_mode = False
+                                st.rerun()
+                            st.markdown('</div>', unsafe_allow_html=True)
+                            
+                            # CSS to match button height and style to the status box
+                            st.markdown("""
+<style>
+.custom-button-container button {
+    height: 48px !important;
+    margin: 0 !important;
+    border-radius: 8px !important;
+    border: 1px solid rgba(106,170,100,0.4) !important;
+    background: rgba(106,170,100,0.15) !important;
+    color: #6ee7b7 !important;
+    font-weight: 600 !important;
+}
+.custom-button-container button:hover {
+    background: rgba(106,170,100,0.25) !important;
+    border-color: rgba(106,170,100,0.8) !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+
+
+
+        # Confirmation Modal for Parent Selection
+        if st.session_state.get("notion_confirm_cancel_parent"):
+            import streamlit.components.v1 as _components
+            _components.html("""
+<script>
+(function() {
+  var doc = window.parent.document;
+  if (doc.getElementById('notion-cancel-parent-overlay')) return;
+
+  var overlay = doc.createElement('div');
+  overlay.id = 'notion-cancel-parent-overlay';
+  overlay.style.cssText = [
+    'position:fixed','top:0','left:0','width:100%','height:100%',
+    'background:rgba(0,0,0,0.65)','z-index:999999',
+    'display:flex','align-items:center','justify-content:center',
+    'backdrop-filter:blur(3px)','-webkit-backdrop-filter:blur(3px)'
+  ].join(';');
+
+  var card = doc.createElement('div');
+  card.style.cssText = [
+    'background:#1a1a2e','border:1px solid rgba(108,99,255,0.45)',
+    'border-radius:16px','padding:36px 40px','text-align:center',
+    'min-width:340px','max-width:420px','box-shadow:0 20px 60px rgba(0,0,0,0.5)',
+    'font-family:Inter,sans-serif'
+  ].join(';');
+
+  card.innerHTML = `
+    <div style="font-size:40px;margin-bottom:12px">❓</div>
+    <h2 style="color:#f0f0f0;margin:0 0 8px;font-size:20px;font-weight:700">Cancel selection?</h2>
+    <p style="color:#999;font-size:14px;margin:0 0 28px;line-height:1.5">
+      Would you like to keep the current selection or cancel/remove it?
+    </p>
+    <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+      <button id="notion-parent-keep" style="
+        background:linear-gradient(135deg,#6c63ff,#8b5cf6);color:white;
+        border:none;border-radius:8px;padding:10px 28px;font-size:14px;
+        font-weight:600;cursor:pointer;transition:opacity 0.15s">
+        Keep Selection
+      </button>
+      <button id="notion-parent-cancel" style="
+        background:linear-gradient(135deg,#dc2626,#b91c1c);color:white;
+        border:none;border-radius:8px;padding:10px 28px;font-size:14px;
+        font-weight:600;cursor:pointer;transition:opacity 0.15s">
+        Cancel Selection
+      </button>
+    </div>
+  `;
+
+  overlay.appendChild(card);
+  doc.body.appendChild(overlay);
+
+  doc.getElementById('notion-parent-keep').onclick = function() {
+    overlay.remove();
+    var btns = doc.querySelectorAll('button');
+    for (var b of btns) {
+      if (b.innerText.trim() === 'Keep Selection') { b.click(); break; }
+    }
+  };
+  doc.getElementById('notion-parent-cancel').onclick = function() {
+    overlay.remove();
+    var btns = doc.querySelectorAll('button');
+    for (var b of btns) {
+      if (b.innerText.trim() === 'Cancel Selection') { b.click(); break; }
+    }
+  };
+})();
+</script>
+""", height=0, width=0)
+
+            hpc1, hpc2 = st.columns(2)
+            with hpc1:
+                if st.button("Keep Selection", key="keep_parent_selection"):
+                    st.session_state.notion_confirm_cancel_parent = False
+                    st.rerun()
+            with hpc2:
+                if st.button("Cancel Selection", key="cancel_parent_start_over"):
+                    st.session_state.notion_confirm_cancel_parent = False
+                    st.session_state.notion_parent_selection_mode = False
+                    st.session_state.notion_parent_selected = False
+                    st.session_state.notion_parent_mode = "new_page"
+                    st.session_state.notion_selected_parent_id = None
+                    st.session_state.notion_selected_parent_name = ""
+                    st.rerun()
+
+
+        page_title = st.text_input("📄 Page Title", placeholder="e.g. Project Research",
+                                   key=f"notion_title_{version}", disabled=not parent_selected,
+                                   help="Please select New Page or Existing Page first before filling the inputs." if not parent_selected else None)
+        dtv = st.session_state.get(f"notion_direct_{version}", "").strip()
+        aiv = st.session_state.get(f"notion_ai_{version}", "").strip()
+        c1, c2 = st.columns(2)
+        with c1:
+            direct_content = st.text_area("✍️ Direct Content",
+                placeholder="Enter text to keep as-is…",
+                key=f"notion_direct_{version}", height=130, disabled=(aiv != "" or not parent_selected),
+                help="Please select New Page or Existing Page first before filling the inputs." if not parent_selected else None)
+        with c2:
+            ai_prompt = st.text_area("🤖 AI Generation Prompt",
                 placeholder="Describe what you want the AI to generate…",
-                key=f"notion_ai_input_{version}",
-                height=140,
-                disabled=(direct_text_val != ""),
-            )
+                key=f"notion_ai_{version}", height=130, disabled=(dtv != "" or not parent_selected),
+                help="Please select New Page or Existing Page first before filling the inputs." if not parent_selected else None)
 
-        # ── Formatting dropdowns (multi-select) ───────────────────────────────
-        st.markdown("**🎨 Formatting & Block Preferences** *(select multiple — AI will apply all chosen styles)*")
+        # ── Formatting dropdowns ───────────────────────────────────────────────
+        st.markdown("**🎨 Formatting & Block Preferences**")
+        st.caption("Open each dropdown, select options, then click **Apply Preferences** when done.")
 
         ms_cols = st.columns(5)
-        dd_keys = list(FORMATTING_OPTIONS.keys())
-        selected_formats: dict[str, list[str]] = {}
+        # Use a staging dict — only committed when Apply is clicked
+        staging_key = f"notion_fmt_staging_{version}"
+        if staging_key not in st.session_state:
+            st.session_state[staging_key] = {k: [] for k in FORMATTING_OPTIONS}
+        staging = st.session_state[staging_key]
 
-        for col, key in zip(ms_cols, dd_keys):
+        for col, key in zip(ms_cols, list(FORMATTING_OPTIONS.keys())):
             with col:
-                # Options without the "— None —" placeholder (not needed for multiselect)
-                opts = [o for o in FORMATTING_OPTIONS[key] if o != "— None —"]
-                choices = st.multiselect(
-                    key,
-                    options=opts,
-                    default=[],
-                    key=f"notion_fmt_{key}_{version}",
-                    placeholder="Choose…",
-                )
-                selected_formats[key] = choices
+                opts = FORMATTING_OPTIONS[key]
+                cur  = staging.get(key, [])
+                cnt  = len(cur)
+                lbl  = f"{key} ({cnt}✓)" if cnt else key
+                with st.popover(lbl, use_container_width=True):
+                    st.markdown(f"**{key}**")
+                    new_cur = []
+                    for opt in opts:
+                        is_sel = opt in cur
+                        checked = st.checkbox(opt, value=is_sel,
+                                              key=f"cb_{key}_{opt}_{version}")
+                        if checked:
+                            new_cur.append(opt)
+                    # Only update staging — no st.rerun() here to avoid lag
+                    staging[key] = new_cur
+                    st.session_state[staging_key] = staging
 
-        # ── Green-tick summary of all active selections ────────────────────────
-        all_selected = [item for choices in selected_formats.values() for item in choices]
-        if all_selected:
-            ticks = "  ".join(f"✅ {s}" for s in all_selected)
+        st.caption("Click any option to select ✓. Click again to deselect.")
+
+        # Apply button — commits staging to applied selections
+        if st.button("✅ Apply Preferences", key=f"apply_fmt_{version}"):
+            st.session_state.notion_fmt_selections = {k: list(v) for k, v in staging.items()}
+            st.session_state.notion_fmt_applied = True
+            st.rerun()
+
+        # Show applied selections summary
+        applied = st.session_state.get("notion_fmt_selections", {})
+        all_applied = [item for choices in applied.values() for item in choices]
+        if all_applied:
+            ticks = "  ".join(f"✅ {s}" for s in all_applied)
             st.markdown(
                 f"<div style='background:rgba(0,200,100,0.08);border:1px solid rgba(0,200,100,0.3);"
-                f"border-radius:8px;padding:8px 14px;margin-top:4px;font-size:13px;color:#6ee7b7'>"
-                f"{ticks}</div>",
-                unsafe_allow_html=True,
-            )
-        media_items = st.session_state.notion_media_items  # persisted list
+                f"border-radius:8px;padding:8px 14px;margin:4px 0;font-size:13px;color:#6ee7b7'>"
+                f"<b>Applied:</b> {ticks}</div>", unsafe_allow_html=True)
 
-        # Show upload/URL input for each selected media type
-        media_choices = selected_formats.get("Media & Files", [])
-        active_media_choices = [m for m in media_choices if m in MEDIA_UPLOAD_OPTIONS]
+        # ── Media inputs — dynamic "Add More" per type ─────────────────────────
+        media_items = st.session_state.notion_media_items
+        media_choices = applied.get("Media & Files", [])
+        adv_choices   = applied.get("Advanced & Interactive", [])
+        all_needing   = [m for m in media_choices if m in MEDIA_NEEDS_INPUT] + \
+                        [m for m in adv_choices if m == "Button"]
 
-        if active_media_choices:
-            for media_choice in active_media_choices:
-                st.markdown(f"**📎 {media_choice} — Add Source**")
-                url_only = media_choice in URL_ONLY_OPTIONS
-                placeholder = MEDIA_URL_PLACEHOLDERS.get(media_choice, "https://...")
+        if all_needing:
+            st.markdown("---")
+            st.markdown("**📎 Media & Embed Sources**")
 
-                if url_only:
-                    # URL-only embed — no file upload needed
-                    media_url = st.text_input(
-                        f"URL for {media_choice}",
-                        placeholder=placeholder,
-                        key=f"notion_media_url_{version}_{media_choice}",
-                        label_visibility="collapsed",
-                    )
-                    uploaded_file = None
-                else:
-                    m_col1, m_col2 = st.columns([1, 1])
-                    with m_col1:
-                        media_url = st.text_input(
-                            "Paste URL / link",
-                            placeholder=placeholder,
-                            key=f"notion_media_url_{version}_{media_choice}",
-                        )
-                    with m_col2:
-                        uploaded_file = st.file_uploader(
-                            "Or upload from device",
-                            key=f"notion_media_upload_{version}_{media_choice}",
-                            label_visibility="visible",
-                        )
+            for mtype in all_needing:
+                st.markdown(f"**{mtype}**")
+                ph = MEDIA_PLACEHOLDERS.get(mtype, "https://...")
+                url_only = mtype in URL_ONLY
+                is_btn   = mtype == "Button"
 
-                add_col, _ = st.columns([1, 4])
-                with add_col:
-                    if st.button("➕ Add to page", key=f"add_media_{version}_{media_choice}"):
-                        if media_url and media_url.strip():
-                            media_items.append({
-                                "type":   media_choice,
-                                "source": "url",
-                                "value":  media_url.strip(),
-                            })
-                            st.success(f"✅ {media_choice} URL added.")
-                        elif uploaded_file is not None:
-                            media_items.append({
-                                "type":   media_choice,
-                                "source": "upload",
-                                "value":  uploaded_file.name,
-                                "data":   uploaded_file.read(),
-                            })
-                            st.success(f"✅ {media_choice} file '{uploaded_file.name}' added.")
-                        else:
-                            st.warning("Please paste a URL or upload a file first.")
-                        st.session_state.notion_media_items = media_items
+                # Dynamic list of URL fields for this type
+                count_key = f"media_count_{mtype}_{version}"
+                if count_key not in st.session_state:
+                    st.session_state[count_key] = 1
+                field_count = st.session_state[count_key]
+
+                for fi in range(field_count):
+                    fkey = f"media_url_{mtype}_{fi}_{version}"
+                    if is_btn:
+                        bc1, bc2 = st.columns(2)
+                        with bc1:
+                            st.text_input(f"Button Label #{fi+1}", placeholder="e.g. Open Link",
+                                          key=f"btn_label_{mtype}_{fi}_{version}")
+                        with bc2:
+                            st.text_input(f"Button URL #{fi+1}", placeholder=ph, key=fkey)
+                    elif url_only:
+                        st.text_input(f"URL #{fi+1}", placeholder=ph, key=fkey,
+                                      label_visibility="collapsed")
+                    else:
+                        mc1, mc2 = st.columns(2)
+                        with mc1:
+                            st.text_input(f"URL #{fi+1}", placeholder=ph, key=fkey)
+                        with mc2:
+                            st.file_uploader(f"Upload #{fi+1}",
+                                             key=f"media_upload_{mtype}_{fi}_{version}",
+                                             label_visibility="visible")
+
+                # Add More button
+                ac1, ac2 = st.columns([1, 4])
+                with ac1:
+                    if st.button(f"➕ Add More {mtype}", key=f"addmore_{mtype}_{version}"):
+                        st.session_state[count_key] += 1
                         st.rerun()
 
+                st.caption(f"💡 Click **'Add {mtype} to Page'** after filling in the fields above.")
+
+                # Commit button
+                if st.button(f"✔ Add {mtype} to Page", key=f"commit_{mtype}_{version}"):
+                    added = 0
+                    for fi in range(field_count):
+                        fkey = f"media_url_{mtype}_{fi}_{version}"
+                        url_val = st.session_state.get(fkey, "").strip()
+                        if is_btn:
+                            lbl_val = st.session_state.get(f"btn_label_{mtype}_{fi}_{version}", "").strip()
+                            if lbl_val and url_val:
+                                media_items.append({"type":"Button","source":"url",
+                                                    "value":f"{lbl_val}|{url_val}"})
+                                added += 1
+                        elif url_val:
+                            media_items.append({"type":mtype,"source":"url","value":url_val})
+                            added += 1
+                        else:
+                            up_key = f"media_upload_{mtype}_{fi}_{version}"
+                            uf = st.session_state.get(up_key)
+                            if uf is not None:
+                                media_items.append({"type":mtype,"source":"upload",
+                                                    "value":uf.name,"data":uf.read()})
+                                added += 1
+                    if added:
+                        st.session_state.notion_media_items = media_items
+                        st.success(f"✅ {added} {mtype} item(s) added.")
+                        st.rerun()
+                    else:
+                        st.warning("Please fill in at least one URL or upload a file.")
+
+        # Queued media list
         if media_items:
-            st.caption(f"**Queued media ({len(media_items)}):**")
+            st.markdown("**Queued media:**")
             for mi, item in enumerate(media_items):
-                c1, c2 = st.columns([5, 1])
-                c1.caption(f"• ✅ {item['type']} — {item['source'].upper()}: {item['value']}")
-                if c2.button("✕", key=f"rm_media_{mi}"):
+                mc1, mc2 = st.columns([5, 1])
+                mc1.caption(f"✅ {item['type']} — {item['source'].upper()}: {item['value']}")
+                if mc2.button("✕", key=f"rm_media_{mi}_{version}"):
                     media_items.pop(mi)
                     st.session_state.notion_media_items = media_items
                     st.rerun()
 
-        # ── Prepare / Generate ─────────────────────────────────────────────────
+        # ── Prepare Preview ────────────────────────────────────────────────────
         if st.button("🔍 Prepare Preview", key="run_notion_agent") and (page_title or direct_content or ai_prompt):
             st.session_state.notion_workflow_state = "preparing"
             st.session_state.notion_preview_title  = page_title or "Untitled Page"
 
-            # Collect active formatting hints from all multi-select choices
+            # Build formatting hints from applied selections
             active_hints = []
-            for cat, choices in selected_formats.items():
+            for cat, choices in applied.items():
                 if cat == "Media & Files":
                     continue
                 for choice in choices:
@@ -347,48 +720,29 @@ def render_notion_workflow():
                     if hint:
                         active_hints.append(f"- {hint}")
 
-            # Build formatting instruction string for the AI
             fmt_instruction = ""
             if active_hints:
                 fmt_instruction = (
-                    "\n\nUSER-SELECTED FORMATTING PREFERENCES (apply these in the content):\n"
-                    + "\n".join(active_hints)
-                )
+                    "\n\nUSER-SELECTED FORMATTING PREFERENCES (apply these):\n"
+                    + "\n".join(active_hints))
 
-            # Add media placeholders to content
-            media_blocks = _build_media_blocks(media_items)
+            # Build media blocks — placed intelligently
+            media_block_str = _build_media_blocks(media_items, position="end")
 
             with st.status("🧠 Preparing content preview…", expanded=True) as status:
-                current_model = st.session_state.get("selected_model", "llama3:latest")
-                final_parts   = []
-
+                model = st.session_state.get("selected_model", "llama3:latest")
+                parts = []
                 if direct_content:
                     st.write("✨ Refining direct content…")
-                    refined = refine_direct_content(direct_content, model=current_model)
-                    final_parts.append(refined)
-
+                    parts.append(refine_direct_content(direct_content, model=model))
                 if ai_prompt:
                     st.write("✍️ Generating AI content…")
-                    full_instructions = ai_prompt + fmt_instruction
-                    generated = generate_page_content(
+                    parts.append(generate_page_content(
                         st.session_state.notion_preview_title,
-                        full_instructions,
-                        model=current_model,
-                    )
-                    final_parts.append(generated)
-
-                if media_blocks:
-                    final_parts.append(media_blocks)
-
-                st.session_state.notion_preview_content = "\n\n".join(final_parts)
-                st.session_state.notion_current_plan = [
-                    {"step": 1, "action": "Content Preparation",
-                     "description": "Refining and generating content with selected formatting", "status": "complete"},
-                    {"step": 2, "action": "Preview & Review",
-                     "description": "Human-in-the-loop verification", "status": "pending"},
-                    {"step": 3, "action": "Notion Creation",
-                     "description": "Final API execution", "status": "pending"},
-                ]
+                        ai_prompt + fmt_instruction, model=model))
+                if media_block_str:
+                    parts.append(media_block_str)
+                st.session_state.notion_preview_content = "\n\n".join(parts)
                 status.update(label="✅ Preview Ready", state="complete")
                 st.session_state.notion_workflow_state = "preview"
 
@@ -396,62 +750,173 @@ def render_notion_workflow():
         if st.session_state.notion_workflow_state == "preview":
             st.divider()
             st.subheader("👀 Content Preview")
-            st.info("Review your content. Send directly, Edit, or Cancel.")
 
             if st.session_state.notion_is_editing:
                 st.session_state.notion_preview_title = st.text_input(
-                    "Edit Title", value=st.session_state.notion_preview_title,
-                    key="edit_title_field",
-                )
+                    "Edit Title", value=st.session_state.notion_preview_title, key="edit_title_f")
                 st.session_state.notion_preview_content = st.text_area(
                     "Edit Content", value=st.session_state.notion_preview_content,
-                    height=320, key="edit_content_field",
-                )
+                    height=320, key="edit_content_f")
             else:
                 st.markdown(f"### {st.session_state.notion_preview_title}")
                 _render_rich_preview(st.session_state.notion_preview_content)
 
-            st.divider()
-            col_send, col_edit, col_cancel = st.columns(3)
+            # Satisfaction message
+            st.markdown(
+                "<div style='background:rgba(108,99,255,0.06);border:1px solid rgba(108,99,255,0.2);"
+                "border-radius:8px;padding:10px 16px;margin:10px 0;font-size:13px;color:#c4b5fd'>"
+                "Are you satisfied with this content? If not, <b>Edit</b> or <b>Recreate</b> it."
+                "</div>", unsafe_allow_html=True)
 
-            with col_send:
-                if st.button("📤 Send to Notion", key="execute_notion_final", use_container_width=True):
+            st.divider()
+            
+            # Show current selection status
+            if st.session_state.notion_parent_mode == "new_page":
+                st.info("📄 This page will be created as a **new, standalone page** at the workspace root level.")
+            elif st.session_state.notion_parent_mode == "existing_page" and st.session_state.notion_selected_parent_name:
+                st.success(f"📁 This page will be created inside: **{st.session_state.notion_selected_parent_name}**")
+            
+            st.divider()
+            if st.session_state.notion_parent_mode == "new_page":
+                st.info("📄 This page will be created as a **new, standalone page** at the workspace root level.")
+            elif st.session_state.notion_parent_mode == "existing_page" and st.session_state.notion_selected_parent_name:
+                st.success(f"📁 This page will be created inside: **{st.session_state.notion_selected_parent_name}**")
+            
+            st.divider()
+            pc1, pc2, pc3, pc4 = st.columns(4)
+            with pc1:
+                button_label = "📤 Send to Notion"
+                if st.session_state.notion_parent_mode == "existing_page":
+                    button_label = f"📤 Create in '{st.session_state.notion_selected_parent_name}'"
+                
+                if st.button(button_label, key="execute_notion_final", use_container_width=True):
                     st.session_state.notion_workflow_state = "executing"
                     st.rerun()
-
-            with col_edit:
-                edit_label = "💾 Save Edits" if st.session_state.notion_is_editing else "📝 Edit"
-                if st.button(edit_label, key="toggle_edit", use_container_width=True):
+            with pc2:
+                elbl = "💾 Save Edits" if st.session_state.notion_is_editing else "📝 Edit"
+                if st.button(elbl, key="toggle_edit", use_container_width=True):
                     st.session_state.notion_is_editing = not st.session_state.notion_is_editing
                     st.rerun()
-
-            with col_cancel:
-                if st.button("❌ Cancel", key="cancel_notion_preview", use_container_width=True):
-                    _reset_form()
+            with pc3:
+                if st.button("🔄 Recreate", key="recreate_preview", use_container_width=True):
+                    st.session_state.notion_workflow_state = "idle"
+                    st.session_state.notion_preview_content = ""
+                    st.session_state.notion_is_editing = False
                     st.rerun()
+            with pc4:
+                if st.button("❌ Cancel", key="cancel_preview", use_container_width=True):
+                    st.session_state.notion_confirm_cancel = True
+                    st.rerun()
+
+            # Cancel confirmation — true full-screen modal via JS injection
+            if st.session_state.get("notion_confirm_cancel"):
+                import streamlit.components.v1 as _components
+                _components.html("""
+<script>
+(function() {
+  var doc = window.parent.document;
+  if (doc.getElementById('notion-cancel-overlay')) return;
+
+  // Overlay
+  var overlay = doc.createElement('div');
+  overlay.id = 'notion-cancel-overlay';
+  overlay.style.cssText = [
+    'position:fixed','top:0','left:0','width:100%','height:100%',
+    'background:rgba(0,0,0,0.65)','z-index:999999',
+    'display:flex','align-items:center','justify-content:center',
+    'backdrop-filter:blur(3px)','-webkit-backdrop-filter:blur(3px)'
+  ].join(';');
+
+  // Card
+  var card = doc.createElement('div');
+  card.style.cssText = [
+    'background:#1a1a2e','border:1px solid rgba(220,60,60,0.45)',
+    'border-radius:16px','padding:36px 40px','text-align:center',
+    'min-width:340px','max-width:420px','box-shadow:0 20px 60px rgba(0,0,0,0.5)',
+    'font-family:Inter,sans-serif'
+  ].join(';');
+
+  card.innerHTML = `
+    <div style="font-size:40px;margin-bottom:12px">⚠️</div>
+    <h2 style="color:#f0f0f0;margin:0 0 8px;font-size:20px;font-weight:700">Cancel this page?</h2>
+    <p style="color:#999;font-size:14px;margin:0 0 28px;line-height:1.5">
+      All unsaved content will be permanently lost.<br>This action cannot be undone.
+    </p>
+    <div style="display:flex;gap:12px;justify-content:center">
+      <button id="notion-cancel-yes" style="
+        background:linear-gradient(135deg,#dc2626,#b91c1c);color:white;
+        border:none;border-radius:8px;padding:10px 28px;font-size:14px;
+        font-weight:600;cursor:pointer;transition:opacity 0.15s">
+        Yes, Cancel
+      </button>
+      <button id="notion-cancel-keep" style="
+        background:linear-gradient(135deg,#6c63ff,#8b5cf6);color:white;
+        border:none;border-radius:8px;padding:10px 28px;font-size:14px;
+        font-weight:600;cursor:pointer;transition:opacity 0.15s">
+        Keep Editing
+      </button>
+    </div>
+  `;
+
+  overlay.appendChild(card);
+  doc.body.appendChild(overlay);
+
+  // Button actions — click the hidden Streamlit buttons
+  doc.getElementById('notion-cancel-yes').onclick = function() {
+    overlay.remove();
+    var btns = doc.querySelectorAll('button');
+    for (var b of btns) {
+      if (b.innerText.trim() === '✅ Yes, Cancel') { b.click(); break; }
+    }
+  };
+  doc.getElementById('notion-cancel-keep').onclick = function() {
+    overlay.remove();
+    var btns = doc.querySelectorAll('button');
+    for (var b of btns) {
+      if (b.innerText.trim() === '🔙 No, Keep') { b.click(); break; }
+    }
+  };
+})();
+</script>
+""", height=0, width=0)
+
+                # Hidden Streamlit buttons that the JS clicks
+                hc1, hc2 = st.columns(2)
+                with hc1:
+                    if st.button("✅ Yes, Cancel", key="confirm_yes"):
+                        _reset_form()
+                        st.rerun()
+                with hc2:
+                    if st.button("🔙 No, Keep", key="confirm_no"):
+                        st.session_state.notion_confirm_cancel = False
+                        st.rerun()
 
         # ── Execution ──────────────────────────────────────────────────────────
         if st.session_state.notion_workflow_state == "executing":
             title   = st.session_state.notion_preview_title
             content = st.session_state.notion_preview_content
-
-            with st.spinner(f"🚀 Creating Notion page: {title}…"):
-                result = create_notion_page(title, content=content)
-
+            parent_id = None
+            parent_label = "Workspace Root"
+            
+            if st.session_state.notion_parent_mode == "existing_page":
+                parent_id = st.session_state.notion_selected_parent_id
+                parent_label = st.session_state.notion_selected_parent_name
+            
+            with st.spinner(f"🚀 Creating Notion page: {title}… (in {parent_label})"):
+                result = create_notion_page(title, content=content, parent_id=parent_id)
             if result["success"]:
-                page_id  = result["data"]["id"].replace("-", "")
-                page_url = f"https://www.notion.so/{page_id}"
-                record   = {
+                pid = result["data"]["id"].replace("-","")
+                rec = {
                     "title":       title,
-                    "url":         page_url,
+                    "url":         f"https://www.notion.so/{pid}",
                     "content":     content,
-                    "parent_name": result.get("parent_name", "Workspace"),
+                    "parent_name": result.get("parent_name","Workspace"),
                     "created_at":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "data":        result["data"],
                 }
-                st.session_state.notion_page_history.append(record)
-                st.session_state.last_notion_result    = record
-                st.session_state.notion_media_items    = []   # clear media queue
+                st.session_state.notion_page_history.append(rec)
+                st.session_state.last_notion_result    = rec
+                st.session_state.notion_media_items    = []
                 st.session_state.notion_workflow_state = "completed"
                 st.rerun()
             else:
@@ -465,192 +930,21 @@ def render_notion_workflow():
                 st.divider()
                 st.success("🎉 **Page Created Successfully!**")
                 _render_page_card(res, idx=999, show_raw=True)
+                st.markdown(
+                    "<div style='background:rgba(108,99,255,0.06);border:1px solid rgba(108,99,255,0.2);"
+                    "border-radius:10px;padding:14px 18px;margin:14px 0'>"
+                    "<b>Are you satisfied with this content?</b><br>"
+                    "<span style='color:#ccc;font-size:13px'>If not, edit it or recreate it.</span>"
+                    "</div>", unsafe_allow_html=True)
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                if st.button("🔄 Recreate Content", key="recreate_done", use_container_width=True):
+                    st.session_state.notion_workflow_state = "idle"
+                    st.session_state.notion_preview_content = ""
+                    st.rerun()
+            with cc2:
+                if st.button("↩️ Create Another Page", key="new_page", use_container_width=True):
+                    _reset_form()
+                    st.rerun()
 
-            if st.button("↩️ Create Another Page", key="new_notion_task", use_container_width=True):
-                _reset_form()
-                st.rerun()
-
-        # ── History ────────────────────────────────────────────────────────────
         _render_history()
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-def _render_rich_preview(content: str):
-    """
-    Render the preview content with proper handling of:
-    - Standard markdown (headings, bullets, bold, etc.) via st.markdown
-    - Images: ![alt](url) → st.image
-    - Video/YouTube: {video:url} → st.video
-    - Embeds: {embed:url} → clickable link card
-    - Audio: {audio:url} → st.audio
-    """
-    import re
-
-    if not content:
-        st.caption("*(no content)*")
-        return
-
-    lines = content.split("\n")
-    markdown_buffer = []
-
-    def flush_markdown():
-        if markdown_buffer:
-            st.markdown("\n".join(markdown_buffer))
-            markdown_buffer.clear()
-
-    for line in lines:
-        stripped = line.strip()
-
-        # Image: ![alt](url)
-        img_match = re.match(r"!\[([^\]]*)\]\(([^)]+)\)", stripped)
-        if img_match:
-            flush_markdown()
-            url = img_match.group(2)
-            alt = img_match.group(1) or "Image"
-            if url.startswith("http"):
-                try:
-                    st.image(url, caption=alt, use_container_width=True)
-                except Exception:
-                    st.markdown(f"🖼️ **Image:** [{alt}]({url})")
-            else:
-                st.markdown(f"🖼️ **Image (local):** `{url}`")
-            continue
-
-        # Video: {video:url}
-        vid_match = re.match(r"\{video:(.+)\}", stripped)
-        if vid_match:
-            flush_markdown()
-            url = vid_match.group(1).strip()
-            try:
-                st.video(url)
-            except Exception:
-                st.markdown(f"🎬 **Video:** [{url}]({url})")
-            continue
-
-        # Embed: {embed:url}
-        emb_match = re.match(r"\{embed:(.+)\}", stripped)
-        if emb_match:
-            flush_markdown()
-            url = emb_match.group(1).strip()
-            st.markdown(
-                f"<div style='background:rgba(108,99,255,0.08);border:1px solid rgba(108,99,255,0.25);"
-                f"border-radius:8px;padding:10px 14px;margin:4px 0'>"
-                f"🔗 <b>Embed:</b> <a href='{url}' target='_blank'>{url}</a></div>",
-                unsafe_allow_html=True,
-            )
-            continue
-
-        # Audio bookmark lines like "> 🎵 Audio: [url](url)"
-        audio_match = re.match(r">\s*🎵\s*Audio:\s*\[([^\]]+)\]\(([^)]+)\)", stripped)
-        if audio_match:
-            flush_markdown()
-            url = audio_match.group(2)
-            try:
-                st.audio(url)
-            except Exception:
-                st.markdown(f"🎵 **Audio:** [{url}]({url})")
-            continue
-
-        # Everything else — accumulate as markdown
-        markdown_buffer.append(line)
-
-    flush_markdown()
-
-
-def _reset_form():
-    st.session_state.notion_workflow_state  = "idle"
-    st.session_state.notion_current_plan    = []
-    st.session_state.notion_parsed_intent   = None
-    st.session_state.last_notion_result     = None
-    st.session_state.notion_preview_title   = ""
-    st.session_state.notion_preview_content = ""
-    st.session_state.notion_is_editing      = False
-    st.session_state.notion_media_items     = []
-    st.session_state.notion_form_version   += 1
-
-
-def _build_media_blocks(media_items: list) -> str:
-    """Convert queued media items into markdown/block syntax for the page."""
-    if not media_items:
-        return ""
-    lines = ["---", "## 📎 Media & Attachments", ""]
-    for item in media_items:
-        t = item["type"]
-        v = item["value"]
-        src = item["source"]
-        if t == "Image":
-            lines.append(f"![{v}]({v})" if src == "url" else f"![{v}](attachment:{v})")
-        elif t in ("Video", "YouTube Embed"):
-            lines.append(f"{{video:{v}}}")
-        elif t in ("PDF Embed", "Google Drive Embed", "Maps Embed", "Tally Form"):
-            lines.append(f"{{embed:{v}}}")
-        elif t == "Web Bookmark":
-            lines.append(f"> 🔖 Bookmark: [{v}]({v})")
-        elif t == "Audio":
-            lines.append(f"> 🎵 Audio: [{v}]({v})")
-        elif t == "File":
-            lines.append(f"> 📄 File: {v}")
-        else:
-            lines.append(f"> 🔗 {t}: [{v}]({v})")
-    return "\n".join(lines)
-
-
-def _render_page_card(rec: dict, idx: int, show_raw: bool = False):
-    st.markdown(
-        """<div style="
-            background: linear-gradient(135deg, rgba(108,99,255,0.08), rgba(167,139,250,0.04));
-            border: 1px solid rgba(108,99,255,0.28);
-            border-radius: 12px;
-            padding: 18px 22px;
-            margin-bottom: 10px;">""",
-        unsafe_allow_html=True,
-    )
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown(f"**📄 Title:** {rec['title']}")
-        st.markdown(f"**📁 Created in:** {rec['parent_name']}")
-    with col_b:
-        st.markdown(f"**🕐 Created at:** {rec.get('created_at', '—')}")
-        st.markdown(f"**🔗 Link:** [Open in Notion]({rec['url']})")
-
-    if rec.get("content"):
-        st.markdown("**📝 Content written:**")
-        st.text_area(
-            "content_preview",
-            value=rec["content"],
-            height=160,
-            disabled=True,
-            key=f"notion_card_{idx}_{rec.get('created_at', idx)}",
-            label_visibility="collapsed",
-        )
-    else:
-        st.caption("No content body — page created with title only.")
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    if show_raw:
-        with st.expander("📦 Raw API Response"):
-            st.json(rec["data"])
-
-
-def _render_history():
-    history = st.session_state.get("notion_page_history", [])
-    if not history:
-        return
-
-    st.divider()
-    st.subheader(f"📜 Page Creation History ({len(history)} page(s))")
-    st.caption("All pages created in this session — newest first.")
-
-    col_clear, _ = st.columns([1, 5])
-    with col_clear:
-        if st.button("🗑️ Clear History", key="clear_notion_history"):
-            st.session_state.notion_page_history = []
-            st.rerun()
-
-    for i, rec in enumerate(reversed(history)):
-        real_idx = len(history) - 1 - i
-        label    = f"{i + 1}. {rec['title']}  —  {rec.get('created_at', '')}"
-        with st.expander(label, expanded=(i == 0)):
-            _render_page_card(rec, idx=real_idx, show_raw=False)

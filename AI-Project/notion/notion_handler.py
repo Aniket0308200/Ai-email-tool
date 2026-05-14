@@ -1,4 +1,4 @@
-﻿import os
+import os
 import json
 import logging
 import requests
@@ -414,6 +414,76 @@ def parse_markdown_to_notion_blocks(content: str) -> list:
                 })
             continue
 
+        # Image: ![alt](url)
+        img_match = re.match(r"!\[([^\]]*)\]\(([^)]+)\)", line)
+        if img_match:
+            alt = img_match.group(1) or "Image"
+            url = img_match.group(2)
+            if url.startswith("http"):
+                blocks.append({
+                    "object": "block", "type": "image",
+                    "image": {"type": "external", "external": {"url": url}}
+                })
+            continue
+
+        # Video: {video:url}
+        vid_match = re.match(r"\{video:(.+)\}", line)
+        if vid_match:
+            url = vid_match.group(1).strip()
+            if "youtube.com" in url or "youtu.be" in url:
+                blocks.append({
+                    "object": "block", "type": "video",
+                    "video": {"type": "external", "external": {"url": url}}
+                })
+            else:
+                blocks.append({
+                    "object": "block", "type": "video",
+                    "video": {"type": "external", "external": {"url": url}}
+                })
+            continue
+
+        # Embed: {embed:url}
+        emb_match = re.match(r"\{embed:(.+)\}", line)
+        if emb_match:
+            url = emb_match.group(1).strip()
+            blocks.append({
+                "object": "block", "type": "embed",
+                "embed": {"url": url}
+            })
+            continue
+
+        # Button: {button:Label|URL}
+        btn_match = re.match(r"\{button:(.+)\|(.+)\}", line)
+        if btn_match:
+            label = btn_match.group(1).strip()
+            url = btn_match.group(2).strip()
+            # Notion API doesn't have a direct 'button' block that redirects on click yet (as of 2024/2025)
+            # but it has 'callout' with a link, or we can use a 'paragraph' with a link styled like a button.
+            # However, for a 'real' feel, we use a callout with a link or a bookmark.
+            # Recent Notion API additions might include buttons, but for safety and 'click to open',
+            # we'll use a callout with a bold link.
+            blocks.append({
+                "object": "block", "type": "callout",
+                "callout": {
+                    "rich_text": [
+                        {"type": "text", "text": {"content": "🔘 "}},
+                        {"type": "text", "text": {"content": label, "link": {"url": url}}, "annotations": {"bold": True}}
+                    ],
+                    "icon": {"emoji": "🔗"}
+                }
+            })
+            continue
+
+        # Web Bookmark: > 🔖 Bookmark: [title](url)
+        bookmark_match = re.search(r"🔖 Bookmark: \[([^\]]+)\]\(([^)]+)\)", line)
+        if bookmark_match:
+            url = bookmark_match.group(2)
+            blocks.append({
+                "object": "block", "type": "bookmark",
+                "bookmark": {"url": url}
+            })
+            continue
+
         # Headings
         if line.startswith("# "):
             blocks.append({"object": "block", "type": "heading_1",
@@ -485,3 +555,66 @@ def parse_rich_text(text: str) -> list:
         content = content[1:-1]
 
     return [{"type": "text", "text": {"content": content}, "annotations": annotations}]
+
+
+def get_existing_pages() -> Dict[str, Any]:
+    """
+    Fetch all accessible pages from Notion workspace.
+    Returns a dictionary with success flag and list of pages.
+    Each page has: id, title, and created_time.
+    """
+    if not is_notion_authenticated():
+        return {"success": False, "error": "Notion not authenticated", "pages": []}
+    
+    headers = get_notion_headers()
+    pages = []
+    has_more = True
+    next_cursor = None
+    
+    try:
+        while has_more:
+            data = {
+                "filter": {"property": "object", "value": "page"},
+                "sort": {"direction": "descending", "timestamp": "last_edited_time"}
+            }
+            if next_cursor:
+                data["start_cursor"] = next_cursor
+            
+            response = requests.post(
+                "https://api.notion.com/v1/search",
+                headers=headers,
+                json=data
+            )
+            
+            if response.status_code != 200:
+                return {
+                    "success": False,
+                    "error": response.json().get("message", response.text),
+                    "pages": pages
+                }
+            
+            result = response.json()
+            results = result.get("results", [])
+            
+            for item in results:
+                if item.get("object") == "page":
+                    # Extract title
+                    properties = item.get("properties", {})
+                    title_data = properties.get("title", {}).get("title", []) or \
+                                 properties.get("Name", {}).get("title", [])
+                    title = title_data[0].get("plain_text", "Untitled") if title_data else "Untitled"
+                    
+                    pages.append({
+                        "id": item.get("id"),
+                        "title": title,
+                        "created_time": item.get("created_time", ""),
+                        "last_edited_time": item.get("last_edited_time", ""),
+                    })
+            
+            has_more = result.get("has_more", False)
+            next_cursor = result.get("next_cursor")
+        
+        return {"success": True, "pages": pages, "error": None}
+    
+    except Exception as e:
+        return {"success": False, "error": str(e), "pages": pages}
