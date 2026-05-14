@@ -26,24 +26,43 @@ ollama pull deepseek-r1:1.5b
 
 ### 2. Install Python dependencies
 
-```bash
+```powershell
 pip install -r requirements.txt
 ```
 
-### 3. Run the app
+### 3. Activate the virtual environment (Windows)
 
-```bash
+```powershell
+cd D:\AI-email-test\AI-Project
+.\.venv\Scripts\Activate.ps1
+```
+
+### 4. Run the app
+
+```powershell
 streamlit run app.py
 ```
 
-The app will open at `http://localhost:8501`.
+If `streamlit` is not found, run:
+
+```powershell
+python -m streamlit run app.py
+```
+
+### 5. Open in browser
+
+Open this URL in your browser:
+
+```text
+http://localhost:8501
+```
 
 ## Models
 
-| Model | Size | Speed |
-|---|---|---|
-| `deepseek-r1:1.5b` | ~1 GB | ⚡ Fast |
-| `deepseek-r1:3b` | ~2 GB | 🧠 Smarter |
+| Model              | Size  | Speed      |
+| ------------------ | ----- | ---------- |
+| `deepseek-r1:1.5b` | ~1 GB | ⚡ Fast    |
+| `deepseek-r1:3b`   | ~2 GB | 🧠 Smarter |
 
 Switch between models in the sidebar at any time.
 

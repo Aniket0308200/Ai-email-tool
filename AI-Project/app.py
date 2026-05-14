@@ -32,6 +32,9 @@ from slack.search_workflow import render_search_workflow as render_slack_search_
 from slack.delete_workflow import render_delete_workflow as render_slack_delete_workflow
 from slack.settings_workflow import render_settings_workflow as render_slack_settings_workflow
 
+# Notion workflows
+from notion.notion_workflow import render_notion_workflow
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
@@ -42,6 +45,10 @@ st.set_page_config(
     page_icon="🧠",
     layout="wide",
 )
+
+# Global OAuth Callback Handler for Notion
+if "code" in st.query_params:
+    st.session_state.current_view = "notion"
 
 st.markdown("""
 <style>
@@ -201,6 +208,7 @@ with st.sidebar:
         ["deepseek-r1:1.5b", "deepseek-r1:3b"],
         index=0,
         label_visibility="collapsed",
+        key="selected_model",
     )
 
     st.divider()
@@ -308,7 +316,7 @@ if "current_view" not in st.session_state:
     st.session_state.current_view = "chat"
 
 st.markdown("### ⚙️ Tools")
-col_nav1, col_nav2, col_nav3, col_spacer = st.columns([0.12, 0.12, 0.12, 0.64], gap="small")
+col_nav1, col_nav2, col_nav3, col_nav4, col_spacer = st.columns([0.12, 0.12, 0.12, 0.12, 0.52], gap="small")
 
 with col_nav1:
     st.markdown('<div class="nav-btn">', unsafe_allow_html=True)
@@ -328,6 +336,13 @@ with col_nav3:
     st.markdown('<div class="nav-btn">', unsafe_allow_html=True)
     if st.button("💬 Slack", key="nav_slack_btn"):
         st.session_state.current_view = "slack"
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with col_nav4:
+    st.markdown('<div class="nav-btn">', unsafe_allow_html=True)
+    if st.button("📝 Notion", key="nav_notion_btn"):
+        st.session_state.current_view = "notion"
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -435,6 +450,10 @@ elif st.session_state.current_view == "slack":
 
     with tab_slack_settings:
         render_slack_settings_workflow()
+
+elif st.session_state.current_view == "notion":
+    st.divider()
+    render_notion_workflow()
 
 st.markdown("""
 <style>
