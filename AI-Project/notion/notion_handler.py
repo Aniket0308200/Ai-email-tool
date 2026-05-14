@@ -378,27 +378,38 @@ def parse_markdown_to_notion_blocks(content: str) -> list:
             i += 1
             continue
 
-        # Table
+        # Table — with cell-count normalization to prevent Notion API errors
         if line.startswith("|") and i + 1 < len(lines) and "|" in lines[i + 1]:
-            rows = []
+            raw_rows = []
             while i < len(lines) and lines[i].strip().startswith("|"):
                 row_line = lines[i].strip()
-                if "---" not in row_line:
+                if not all(c in "-| " for c in row_line):  # skip separator rows
                     cells = [c.strip() for c in row_line.split("|")[1:-1]]
-                    rows.append({
+                    raw_rows.append(cells)
+                i += 1
+
+            if raw_rows:
+                # Determine the canonical width from the header row (first row)
+                table_width = len(raw_rows[0])
+                normalized_rows = []
+                for cells in raw_rows:
+                    # Pad short rows with empty cells, trim long rows
+                    if len(cells) < table_width:
+                        cells = cells + [""] * (table_width - len(cells))
+                    elif len(cells) > table_width:
+                        cells = cells[:table_width]
+                    normalized_rows.append({
                         "type": "table_row",
                         "table_row": {
                             "cells": [[{"type": "text", "text": {"content": c}}] for c in cells]
                         },
                     })
-                i += 1
-            if rows:
                 blocks.append({
                     "object": "block", "type": "table",
                     "table": {
-                        "table_width": len(rows[0]["table_row"]["cells"]),
+                        "table_width": table_width,
                         "has_column_header": True,
-                        "children": rows,
+                        "children": normalized_rows,
                     },
                 })
             continue
