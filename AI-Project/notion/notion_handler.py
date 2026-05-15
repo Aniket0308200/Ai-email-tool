@@ -604,11 +604,23 @@ def get_existing_pages() -> Dict[str, Any]:
                                  properties.get("Name", {}).get("title", [])
                     title = title_data[0].get("plain_text", "Untitled") if title_data else "Untitled"
                     
+                    created_by = item.get("created_by", {}).get("name", "Unknown")
+                    if not created_by or created_by == "Unknown":
+                        # If name is not directly available, it might be a bot or person with just ID
+                        cb_type = item.get("created_by", {}).get("object")
+                        if cb_type == "user":
+                            created_by = "User"
+                    
                     pages.append({
                         "id": item.get("id"),
                         "title": title,
                         "created_time": item.get("created_time", ""),
                         "last_edited_time": item.get("last_edited_time", ""),
+                        "created_by": created_by,
+                        "url": item.get("url", ""),
+                        "archived": item.get("archived", False),
+                        "icon": item.get("icon"),
+                        "cover": item.get("cover"),
                     })
             
             has_more = result.get("has_more", False)
@@ -618,3 +630,131 @@ def get_existing_pages() -> Dict[str, Any]:
     
     except Exception as e:
         return {"success": False, "error": str(e), "pages": pages}
+
+def get_page_preview(page_id: str, max_lines: int = 2) -> str:
+    """Fetch the first few blocks of a page to create a preview."""
+    if not is_notion_authenticated():
+        return ""
+    
+    headers = get_notion_headers()
+    try:
+        response = requests.get(
+            f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=5",
+            headers=headers
+        )
+        if response.status_code != 200:
+            return ""
+        
+        blocks = response.json().get("results", [])
+        preview_parts = []
+        for block in blocks:
+            btype = block.get("type")
+            content_list = block.get(btype, {}).get("rich_text", [])
+            if content_list:
+                text = "".join([t.get("plain_text", "") for t in content_list])
+                if text.strip():
+                    preview_parts.append(text.strip())
+            
+            if len(preview_parts) >= max_lines:
+                break
+        
+        preview = " ".join(preview_parts)
+        if len(preview) > 150:
+            preview = preview[:147] + "..."
+        return preview
+    except Exception:
+        return ""
+
+def get_notion_databases() -> Dict[str, Any]:
+    """Fetch all accessible databases."""
+    if not is_notion_authenticated():
+        return {"success": False, "error": "Notion not authenticated", "databases": []}
+    
+    headers = get_notion_headers()
+    databases = []
+    try:
+        data = {
+            "filter": {"property": "object", "value": "database"},
+            "sort": {"direction": "descending", "timestamp": "last_edited_time"}
+        }
+        response = requests.post("https://api.notion.com/v1/search", headers=headers, json=data)
+        if response.status_code == 200:
+            results = response.json().get("results", [])
+            for item in results:
+                title_data = item.get("title", [])
+                title = title_data[0].get("plain_text", "Untitled Database") if title_data else "Untitled Database"
+                databases.append({
+                    "id": item.get("id"),
+                    "title": title,
+                    "created_time": item.get("created_time", ""),
+                    "last_edited_time": item.get("last_edited_time", ""),
+                    "url": item.get("url", ""),
+                })
+            return {"success": True, "databases": databases}
+        else:
+            return {"success": False, "error": response.json().get("message", response.text)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def get_database_items(database_id: str) -> Dict[str, Any]:
+    """Query items inside a specific database."""
+    if not is_notion_authenticated():
+        return {"success": False, "error": "Notion not authenticated"}
+    
+    headers = get_notion_headers()
+    try:
+        response = requests.post(f"https://api.notion.com/v1/databases/{database_id}/query", headers=headers)
+        if response.status_code == 200:
+            results = response.json().get("results", [])
+            items = []
+            for item in results:
+                props = item.get("properties", {})
+                # Try to find a title property
+                title = "Untitled Item"
+                for p_name, p_val in props.items():
+                    if p_val.get("type") == "title":
+                        t_data = p_val.get("title", [])
+                        title = t_data[0].get("plain_text", "Untitled") if t_data else "Untitled"
+                        break
+                
+                items.append({
+                    "id": item.get("id"),
+                    "title": title,
+                    "created_time": item.get("created_time", ""),
+                    "url": item.get("url", ""),
+                    "data": item
+                })
+            return {"success": True, "items": items}
+        return {"success": False, "error": response.json().get("message", response.text)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def list_page_children(page_id: str) -> Dict[str, Any]:
+    """List child pages of a specific page."""
+    if not is_notion_authenticated():
+        return {"success": False, "error": "Notion not authenticated"}
+    
+    headers = get_notion_headers()
+    try:
+        # We need to fetch blocks and check for 'child_page' type
+        response = requests.get(f"https://api.notion.com/v1/blocks/{page_id}/children", headers=headers)
+        if response.status_code == 200:
+            blocks = response.json().get("results", [])
+            children = []
+            for block in blocks:
+                if block.get("type") == "child_page":
+                    children.append({
+                        "id": block.get("id"),
+                        "title": block.get("child_page", {}).get("title", "Untitled"),
+                        "type": "page"
+                    })
+                elif block.get("type") == "child_database":
+                    children.append({
+                        "id": block.get("id"),
+                        "title": block.get("child_database", {}).get("title", "Untitled"),
+                        "type": "database"
+                    })
+            return {"success": True, "children": children}
+        return {"success": False, "error": response.json().get("message", response.text)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}

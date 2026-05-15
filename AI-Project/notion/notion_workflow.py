@@ -1,18 +1,19 @@
-﻿import re
+import re
 import streamlit as st
 from datetime import datetime
 from notion.notion_handler import (
     is_notion_authenticated, get_notion_auth_url, exchange_code_for_token,
     create_notion_page, get_authenticated_user, clear_authentication,
     _load_config, _save_config, generate_page_content, refine_direct_content,
-    get_existing_pages,
+    get_existing_pages, get_page_preview, get_notion_databases,
+    get_database_items, list_page_children,
 )
 
 FORMATTING_OPTIONS = {
     "Text Formatting": ["Text","Bold","Italic","Underline","Strikethrough","Inline Code","Text Color","Background Color (Highlight)","Equations (Math)","Comments"],
-    "Basic Blocks": ["Heading 1","Heading 2","Heading 3","Bullet List","Numbered List","To-do List (Checklist)","Toggle List","Quote","Callout","Divider","Table (Simple)","Table of Contents"],
+    "Basic Blocks": ["Heading 1","Heading 2","Heading 3","Bullet List","Numbered List","To-do List (Checklist)","Multi Checkbox","Toggle List","Quote","Callout","Divider","Table (Simple)","Table of Contents"],
     "Media & Files": ["Image","Video","Audio","File","Web Bookmark","Code Block","YouTube Embed","Google Drive Embed","PDF Embed","Maps Embed","Tally Form"],
-    "Databases & Views": ["Table View","Board View (Kanban)","Gallery View","List View","Calendar View","Timeline View"],
+    "Databases & Views": ["Table View","Board View (Kanban)","Gallery View","List View","Calendar View","Timeline View","Task Checkbox (Database)"],
     "Advanced & Interactive": ["Synced Block","Columns","Button","Template Button","Breadcrumb"],
 }
 
@@ -35,6 +36,7 @@ BLOCK_HINT_MAP = {
     "Heading 1":"Use # Heading 1 for main title section.","Heading 2":"Use ## Heading 2 for major sections.",
     "Heading 3":"Use ### Heading 3 for subsections.","Bullet List":"Use - bullet lists for unordered items.",
     "Numbered List":"Use 1. numbered lists for ordered steps.","To-do List (Checklist)":"Use - [ ] checkboxes for tasks.",
+    "Multi Checkbox":"Generate a checklist with at least 3-5 items using the - [ ] checkbox syntax. Ensure each item is a real, interactive checkbox block.",
     "Toggle List":"Use >? toggle blocks for collapsible details.","Quote":"Use > quote blocks for statements.",
     "Callout":"Use >> callout blocks with emoji for tips/warnings.","Divider":"Use --- dividers between sections.",
     "Table (Simple)":"Include a | table | with headers.","Table of Contents":"Start with a structured overview.",
@@ -42,6 +44,7 @@ BLOCK_HINT_MAP = {
     "Board View (Kanban)":"Organize into status columns: To Do, In Progress, Done.",
     "Gallery View":"Present items as a visual card gallery.","List View":"Present items as a clean list.",
     "Calendar View":"Include dates and schedule info.","Timeline View":"Include a chronological sequence.",
+    "Task Checkbox (Database)":"Generate a professional task list with at least 3-5 tasks using the - [ ] checkbox syntax, structured like a database task tracker.",
     "Synced Block":"Note this block should be synced.","Columns":"Organize into side-by-side columns.",
     "Button":"Include an actionable button call-to-action.","Breadcrumb":"Include a navigation breadcrumb.",
     "YouTube Embed":"Include a YouTube video embed.","Google Drive Embed":"Include a Google Drive embed.",
@@ -274,6 +277,254 @@ def _render_history():
             _render_page_card(rec, idx=real_idx, show_raw=False)
 
 
+def render_notion_listing():
+    st.markdown("### 📋 Listing System")
+    st.caption("Browse, filter, and sort your Notion pages and data.")
+
+    # 1. Listing Filters & Controls
+    col_l1, col_l2, col_l3 = st.columns([1.5, 1.5, 1.2])
+    
+    with col_l1:
+        # Use popover to fulfill the "click icon to open/close" behavior
+        with st.popover("📁 Listing Category", use_container_width=True):
+            listing_type = st.radio("Select Category", [
+                "General Page Listings", "Nested & Structure Listings", "Database Listings",
+                "Task & Productivity Listings", "Workspace Listings", "Content Block Listings",
+                "Collaboration Listings", "Search-Based Listings", "Template & Notes Listings",
+                "Activity Listings", "Special Listings"
+            ], key="notion_listing_category_radio")
+    
+    sub_types = {
+        "General Page Listings": ["Total Pages", "Recent Pages", "Last Created Pages", "Last Edited Pages", "Favorite Pages", "Archived Pages", "Shared Pages", "Private Pages", "Public Pages", "Top Used Pages", "Pinned Pages"],
+        "Nested & Structure Listings": ["Pages Inside a Page", "Subpages", "Nested Pages", "Child Pages", "Linked Pages", "Page Hierarchy", "Breadcrumb/Page Path", "Workspace Structure"],
+        "Database Listings": ["Databases", "Database Items", "Recent Database Entries", "Filtered Database Listing", "Sorted Database Listing"],
+        "Task & Productivity Listings": ["Completed Tasks", "Pending Tasks", "Overdue Tasks", "Reminders", "Calendar Entries", "Scheduled Notes", "Todo Pages", "Project Pages"],
+        "Workspace Listings": ["Workspace Pages", "Teamspace Pages", "Connected Workspace"],
+        "Content Block Listings": ["Page Content Blocks", "Headings", "Paragraphs", "Checklist Items", "Tables", "Images/Files", "Links", "Code Blocks"],
+        "Collaboration Listings": ["Comments", "Mentions", "Collaborators", "Shared Users"],
+        "Search-Based Listings": ["Search Keyword", "Search by Title", "Search by Date", "Search by Tag", "Search by User"],
+        "Template & Notes Listings": ["Templates", "Journals", "Meeting Notes", "Notes"],
+        "Activity Listings": ["Recently Opened Pages", "Recently Viewed Pages", "Recently Updated Pages"],
+        "Special Listings": ["Duplicate Pages", "Empty Pages", "Untitled Pages", "AI Generated Pages", "Summarized Pages", "Extracted Tasks"]
+    }
+    
+    with col_l2:
+        with st.popover("🔍 Specific View", use_container_width=True):
+            specific_type = st.radio("Select View", sub_types.get(listing_type, ["Total Pages"]), key="notion_listing_subtype_radio")
+    
+    with col_l3:
+        # Integrated Listing Limit UI
+        if "notion_limit_val" not in st.session_state:
+            st.session_state.notion_limit_val = 10
+            
+        l_row = st.columns([1.5, 0.8, 0.8, 1.2])
+        
+        with l_row[0]:
+            # Display current limit (can be a number input for direct typing)
+            curr_val = st.number_input("Limit", value=st.session_state.notion_limit_val, 
+                                        min_value=1, max_value=500, label_visibility="collapsed", key="notion_limit_manual_input")
+            if curr_val != st.session_state.notion_limit_val:
+                st.session_state.notion_limit_val = curr_val
+                st.rerun()
+                
+        with l_row[1]:
+            if st.button("−", key="notion_l_dec", use_container_width=True):
+                st.session_state.notion_limit_val = max(1, st.session_state.notion_limit_val - 1)
+                st.rerun()
+                
+        with l_row[2]:
+            if st.button("+", key="notion_l_inc", use_container_width=True):
+                st.session_state.notion_limit_val = min(500, st.session_state.notion_limit_val + 1)
+                st.rerun()
+                
+        with l_row[3]:
+            # Dropdown for fixed options
+            with st.popover("", use_container_width=True):
+                st.markdown("**Quick Select**")
+                if st.button("10", key="notion_l_10", use_container_width=True):
+                    st.session_state.notion_limit_val = 10; st.rerun()
+                if st.button("20", key="notion_l_20", use_container_width=True):
+                    st.session_state.notion_limit_val = 20; st.rerun()
+                if st.button("50", key="notion_l_50", use_container_width=True):
+                    st.session_state.notion_limit_val = 50; st.rerun()
+                if st.button("All", key="notion_l_all", use_container_width=True):
+                    st.session_state.notion_limit_val = 500; st.rerun()
+                    
+        limit = st.session_state.notion_limit_val
+
+    # Search & Sorting Row
+    col_s1, col_s2, col_s3 = st.columns([2, 1, 1])
+    with col_s1:
+        search_query = st.text_input("🔍 Search Keyword", placeholder="Search in title...", key="notion_listing_search")
+    with col_s2:
+        sort_order = st.radio("Sort Order", ["Newest First", "Oldest First"], horizontal=True, key="notion_listing_sort")
+    with col_s3:
+        st.write("") # spacing
+        st.write("")
+        fetch_clicked = st.button("📥 Fetch Data", use_container_width=True, key="notion_fetch_listing_btn")
+
+    # Parent Selection for Nested (only if triggered or in state)
+    parent_id_for_nested = st.session_state.get("notion_listing_parent_id")
+    if specific_type in ["Pages Inside a Page", "Subpages", "Child Pages", "Database Items"]:
+        st.markdown(f"**Target Selection for {specific_type}:**")
+        sc1, sc2 = st.columns([3, 1])
+        with sc1:
+            if "Database" in specific_type:
+                db_res = get_notion_databases()
+                if db_res.get("success"):
+                    dbs = {db["title"]: db["id"] for db in db_res.get("databases", [])}
+                    sel_db_title = st.selectbox("Select Database", list(dbs.keys()), key="nested_db_sel")
+                    parent_id_for_nested = dbs.get(sel_db_title)
+            else:
+                pg_res = get_existing_pages()
+                if pg_res.get("success"):
+                    pgs = {p["title"]: p["id"] for p in pg_res.get("pages", [])}
+                    sel_pg_title = st.selectbox("Select Parent Page", list(pgs.keys()), key="nested_pg_sel")
+                    parent_id_for_nested = pgs.get(sel_pg_title)
+        with sc2:
+            st.write("")
+            st.write("")
+            if st.button("Apply Target", key="apply_target_btn", use_container_width=True):
+                st.session_state.notion_listing_parent_id = parent_id_for_nested
+                st.rerun()
+
+    st.divider()
+
+    # 2. Fetch Data (only if button clicked or already in session)
+    if not fetch_clicked and "notion_listing_items" not in st.session_state:
+        st.info("⚠️ Please select a **Listing Type** and click **📥 Fetch Data** to view records.")
+        return
+
+    if fetch_clicked:
+        with st.spinner(f"Fetching {specific_type}..."):
+            items = []
+            if specific_type == "Databases":
+                res = get_notion_databases()
+                items = res.get("databases", []) if res.get("success") else []
+            elif specific_type == "Database Items" and parent_id_for_nested:
+                res = get_database_items(parent_id_for_nested)
+                items = res.get("items", []) if res.get("success") else []
+            elif specific_type in ["Pages Inside a Page", "Subpages", "Child Pages"] and parent_id_for_nested:
+                res = list_page_children(parent_id_for_nested)
+                items = res.get("children", []) if res.get("success") else []
+            elif specific_type == "Archived Pages":
+                res = get_existing_pages()
+                items = [p for p in res.get("pages", []) if p.get("archived")] if res.get("success") else []
+            else:
+                res = get_existing_pages()
+                items = res.get("pages", []) if res.get("success") else []
+            
+            st.session_state.notion_listing_items = items
+            st.session_state.notion_listing_last_type = specific_type
+
+    items = st.session_state.get("notion_listing_items", [])
+    
+    # Filter by Search Query
+    if search_query:
+        items = [p for p in items if search_query.lower() in p.get("title", "").lower()]
+
+    # Filter for specific types
+    if specific_type == "Untitled Pages":
+        items = [p for p in items if p.get("title") == "Untitled" or not p.get("title")]
+    elif "Task" in specific_type or "Todo" in specific_type:
+        items = [p for p in items if any(kw in p.get("title", "").lower() for kw in ["task", "todo", "project", "list", "fix", "issue"])]
+    elif "Journal" in specific_type or "Note" in specific_type:
+        items = [p for p in items if any(kw in p.get("title", "").lower() for kw in ["journal", "note", "meeting", "daily", "memo"])]
+    elif "AI Generated" in specific_type:
+        items = [p for p in items if any(kw in p.get("title", "").lower() for kw in ["ai", "generated", "bot"])]
+
+    if not items:
+        st.warning(f"No records found for '{specific_type}'.")
+        if st.button("Clear Search", key="clear_search_l"):
+            st.session_state.notion_listing_search = ""
+            st.rerun()
+        return
+
+    # Sort
+    items.sort(key=lambda x: x.get("created_time", ""), reverse=(sort_order == "Newest First"))
+    
+    # Limit
+    display_limit = limit
+    display_items = items[:display_limit]
+
+    # 3. Render Items in Table Format
+    st.markdown(f"**Results: {st.session_state.get('notion_listing_last_type', specific_type)}**")
+    
+    # Table Header
+    h_cols = st.columns([0.4, 2.5, 1.5, 1.5, 3, 0.8])
+    headers = ["#", "Page Name", "Created By", "Date & Time", "Content Preview", "Action"]
+    for col, h in zip(h_cols, headers):
+        col.markdown(f"**{h}**")
+    st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #333'>", unsafe_allow_html=True)
+
+    for i, item in enumerate(display_items):
+        r_cols = st.columns([0.4, 2.5, 1.5, 1.5, 3, 0.8])
+        
+        with r_cols[0]:
+            st.write(f"{i+1}")
+        
+        with r_cols[1]:
+            st.markdown(f"**{item.get('title', 'Untitled')}**")
+        
+        with r_cols[2]:
+            st.write(item.get("created_by", "Unknown"))
+            
+        with r_cols[3]:
+            dt = item.get("created_time", "").replace("T", " ").split(".")[0]
+            st.write(dt)
+            
+        with r_cols[4]:
+            preview = get_page_preview(item['id'])
+            if preview:
+                if len(preview) > 90:
+                    preview = preview[:87] + "..."
+                st.caption(preview)
+            else:
+                st.caption("_(no preview)_")
+                
+        with r_cols[5]:
+            if st.button("👁️", key=f"vbtn_{item['id']}_{i}", help="View Details"):
+                st.session_state.notion_viewing_id = item['id']
+                st.session_state.notion_viewing_title = item['title']
+                st.rerun()
+
+        if i < len(display_items) - 1:
+            st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #222'>", unsafe_allow_html=True)
+
+    st.caption(f"Showing {len(display_items)} of {len(items)} items.")
+
+    # 4. Detailed View Modal (Overlay)
+    if st.session_state.get("notion_viewing_id"):
+        _render_view_overlay()
+
+
+def _render_view_overlay():
+    page_id = st.session_state.notion_viewing_id
+    title = st.session_state.notion_viewing_title
+    
+    st.markdown("---")
+    c1, c2 = st.columns([5, 1])
+    with c1:
+        st.subheader(f"📖 Viewing: {title}")
+    with c2:
+        if st.button("Close", key="close_notion_view"):
+            st.session_state.notion_viewing_id = None
+            st.rerun()
+            
+    with st.spinner("Fetching page content..."):
+        # We can reuse _render_rich_preview if we get the markdown
+        # But get_page_preview only gets a snippet.
+        # Let's add a full page fetcher or just show the snippet for now.
+        preview = get_page_preview(page_id, max_lines=20)
+        st.markdown(f"""
+        <div style='background: #0f0f0f; border: 1px solid #6c63ff; border-radius: 12px; padding: 25px; min-height: 200px;'>
+            {preview if preview else "*(No content or could not fetch)*"}
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown(f"[Open in Notion ↗](https://www.notion.so/{page_id.replace('-', '')})")
+
+
 def render_notion_workflow():
     st.markdown('<div class="page-title">📝 Notion AI Agent</div>', unsafe_allow_html=True)
 
@@ -288,7 +539,7 @@ def render_notion_workflow():
             else:
                 st.error("❌ Failed to connect Notion.")
 
-    tab_agent, tab_settings = st.tabs(["🤖 Create Page", "⚙️ Settings"])
+    tab_agent, tab_listing, tab_settings = st.tabs(["🤖 Create Page", "📋 Listing", "⚙️ Settings"])
 
     # ── Settings ───────────────────────────────────────────────────────────────
     with tab_settings:
@@ -320,6 +571,13 @@ def render_notion_workflow():
                 st.link_button("🔓 Connect Notion", auth_url, use_container_width=True)
             else:
                 st.warning("Configure Client ID and Redirect URL first.")
+
+    # ── Listing tab ────────────────────────────────────────────────────────────
+    with tab_listing:
+        if not is_notion_authenticated():
+            st.warning("⚠️ Connect your Notion account in Settings first.")
+        else:
+            render_notion_listing()
 
     # ── Agent tab ──────────────────────────────────────────────────────────────
     with tab_agent:
@@ -777,12 +1035,7 @@ def render_notion_workflow():
                 st.success(f"📁 This page will be created inside: **{st.session_state.notion_selected_parent_name}**")
             
             st.divider()
-            if st.session_state.notion_parent_mode == "new_page":
-                st.info("📄 This page will be created as a **new, standalone page** at the workspace root level.")
-            elif st.session_state.notion_parent_mode == "existing_page" and st.session_state.notion_selected_parent_name:
-                st.success(f"📁 This page will be created inside: **{st.session_state.notion_selected_parent_name}**")
-            
-            st.divider()
+
             pc1, pc2, pc3, pc4 = st.columns(4)
             with pc1:
                 button_label = "📤 Send to Notion"
