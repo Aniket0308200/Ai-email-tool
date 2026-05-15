@@ -199,17 +199,47 @@ def _create_page_with_fallback_parent(title: str, content: Optional[str], header
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-def search_notion(query: str) -> Dict[str, Any]:
+def search_notion(query: str, filter_type: Optional[str] = None) -> Dict[str, Any]:
     if not is_notion_authenticated():
         return {"success": False, "error": "Notion not authenticated"}
     
     headers = get_notion_headers()
-    data = {"query": query, "sort": {"direction": "descending", "timestamp": "last_edited_time"}}
+    data = {
+        "query": query, 
+        "sort": {"direction": "descending", "timestamp": "last_edited_time"}
+    }
+    
+    if filter_type:
+        data["filter"] = {"property": "object", "value": filter_type} # e.g. 'page' or 'database'
     
     try:
         response = requests.post("https://api.notion.com/v1/search", headers=headers, json=data)
         if response.status_code == 200:
-            return {"success": True, "data": response.json().get("results", [])}
+            results = response.json().get("results", [])
+            # Map into our standard page format
+            pages = []
+            for item in results:
+                obj_type = item.get("object")
+                props = item.get("properties", {})
+                title = "Untitled"
+                if obj_type == "page":
+                    t_data = props.get("title", {}).get("title", []) or props.get("Name", {}).get("title", [])
+                    title = t_data[0].get("plain_text", "Untitled") if t_data else "Untitled"
+                elif obj_type == "database":
+                    t_data = item.get("title", [])
+                    title = t_data[0].get("plain_text", "Untitled Database") if t_data else "Untitled Database"
+                
+                pages.append({
+                    "id": item.get("id"),
+                    "title": title,
+                    "object": obj_type,
+                    "created_time": item.get("created_time", ""),
+                    "last_edited_time": item.get("last_edited_time", ""),
+                    "created_by": item.get("created_by", {}).get("name", "Unknown"),
+                    "url": item.get("url", ""),
+                    "archived": item.get("archived", False)
+                })
+            return {"success": True, "data": pages}
         else:
             return {"success": False, "error": response.json().get("message", response.text)}
     except Exception as e:
@@ -758,3 +788,183 @@ def list_page_children(page_id: str) -> Dict[str, Any]:
         return {"success": False, "error": response.json().get("message", response.text)}
     except Exception as e:
         return {"success": False, "error": str(e)}
+def update_page_title(page_id: str, new_title: str) -> Dict[str, Any]:
+    """Update the title of an existing Notion page."""
+    if not is_notion_authenticated():
+        return {"success": False, "error": "Notion not authenticated"}
+    
+    headers = get_notion_headers()
+    # Need to check if it's a database item or a standalone page for property name (title vs Name)
+    data = {
+        "properties": {
+            "title": [{"text": {"content": new_title}}]
+        }
+    }
+    
+    try:
+        response = requests.patch(f"https://api.notion.com/v1/pages/{page_id}", headers=headers, json=data)
+        if response.status_code == 200:
+            return {"success": True, "data": response.json()}
+        
+        # Try 'Name' property fallback for database items
+        data["properties"] = {"Name": {"title": [{"text": {"content": new_title}}]}}
+        response = requests.patch(f"https://api.notion.com/v1/pages/{page_id}", headers=headers, json=data)
+        if response.status_code == 200:
+            return {"success": True, "data": response.json()}
+            
+        return {"success": False, "error": response.json().get("message", response.text)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def archive_notion_page(page_id: str, archive: bool = True) -> Dict[str, Any]:
+    """Move a page to Trash (archive) or restore it (unarchive)."""
+    if not is_notion_authenticated():
+        return {"success": False, "error": "Notion not authenticated"}
+    
+    headers = get_notion_headers()
+    data = {"archived": archive}
+    
+    try:
+        response = requests.patch(f"https://api.notion.com/v1/pages/{page_id}", headers=headers, json=data)
+        if response.status_code == 200:
+            return {"success": True, "data": response.json()}
+        return {"success": False, "error": response.json().get("message", response.text)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def delete_notion_page_permanent(page_id: str) -> Dict[str, Any]:
+    """
+    Attempt to permanently delete a page/block.
+    Notion does not provide a straightforward page delete endpoint in all cases,
+    but top-level pages are also blocks and can often be removed via the block delete API.
+    If the delete call is not supported, fall back to archiving and let the UI hide the page.
+    """
+    if not is_notion_authenticated():
+        return {"success": False, "error": "Notion not authenticated"}
+
+    headers = get_notion_headers()
+
+    try:
+        response = requests.delete(f"https://api.notion.com/v1/blocks/{page_id}", headers=headers)
+        if response.status_code in (200, 204):
+            return {"success": True, "data": response.json() if response.content else {}}
+
+        # As a fallback for APIs that do not allow direct block delete, archive the page.
+        fallback = archive_notion_page(page_id, archive=True)
+        if fallback.get("success"):
+            return {"success": True, "data": fallback.get("data"), "warning": "fallback_archive"}
+        return {"success": False, "error": response.json().get("message", response.text)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def update_page_content(page_id: str, new_content: str) -> Dict[str, Any]:
+    """Update page content by replacing all blocks."""
+    if not is_notion_authenticated():
+        return {"success": False, "error": "Notion not authenticated"}
+    
+    headers = get_notion_headers()
+    
+    try:
+        # 1. Get existing blocks
+        res = requests.get(f"https://api.notion.com/v1/blocks/{page_id}/children", headers=headers)
+        if res.status_code == 200:
+            existing_blocks = res.json().get("results", [])
+            # Delete them (archive them)
+            for block in existing_blocks:
+                requests.delete(f"https://api.notion.com/v1/blocks/{block['id']}", headers=headers)
+        
+        # 2. Append new blocks
+        new_blocks = parse_markdown_to_notion_blocks(new_content)
+        data = {"children": new_blocks}
+        response = requests.patch(f"https://api.notion.com/v1/blocks/{page_id}/children", headers=headers, json=data)
+        
+        if response.status_code == 200:
+            return {"success": True}
+        return {"success": False, "error": response.json().get("message", response.text)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def duplicate_notion_page(page_id: str) -> Dict[str, Any]:
+    """Duplicate a page by fetching its metadata and content, then creating a new one."""
+    if not is_notion_authenticated():
+        return {"success": False, "error": "Notion not authenticated"}
+    
+    headers = get_notion_headers()
+    try:
+        # 1. Get page details
+        pg_res = requests.get(f"https://api.notion.com/v1/pages/{page_id}", headers=headers)
+        if pg_res.status_code != 200:
+            return {"success": False, "error": "Could not fetch original page"}
+        
+        pg_data = pg_res.json()
+        properties = pg_data.get("properties", {})
+        title_data = properties.get("title", {}).get("title", []) or properties.get("Name", {}).get("title", [])
+        title = title_data[0].get("plain_text", "Untitled Copy") if title_data else "Untitled Copy"
+        title = f"Copy of {title}"
+        
+        # 2. Get children blocks
+        blocks_res = requests.get(f"https://api.notion.com/v1/blocks/{page_id}/children", headers=headers)
+        blocks = blocks_res.json().get("results", []) if blocks_res.status_code == 200 else []
+        
+        # Clean blocks for recreation (remove IDs and other read-only fields)
+        clean_blocks = []
+        for b in blocks:
+            b_type = b.get("type")
+            if b_type:
+                # We only take the type-specific data
+                clean_blocks.append({
+                    "object": "block",
+                    "type": b_type,
+                    b_type: b.get(b_type)
+                })
+        
+        # 3. Create new page
+        parent = pg_data.get("parent", {"workspace": True})
+        # If parent is a database, we need to handle properties correctly
+        # For now, let's assume it's a page parent or workspace
+        create_data = {
+            "parent": parent,
+            "properties": properties,
+            "children": clean_blocks[:100] # Notion has a limit on children in creation
+        }
+        
+        response = requests.post("https://api.notion.com/v1/pages", headers=headers, json=create_data)
+        if response.status_code == 200:
+            return {"success": True, "data": response.json()}
+        return {"success": False, "error": response.json().get("message", response.text)}
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def get_page_full_content(page_id: str) -> str:
+    """Fetch all text content of a page as markdown-ish string."""
+    if not is_notion_authenticated():
+        return ""
+    
+    headers = get_notion_headers()
+    try:
+        response = requests.get(f"https://api.notion.com/v1/blocks/{page_id}/children", headers=headers)
+        if response.status_code != 200:
+            return ""
+        
+        blocks = response.json().get("results", [])
+        content = []
+        for block in blocks:
+            btype = block.get("type")
+            rich_text = block.get(btype, {}).get("rich_text", [])
+            text = "".join([t.get("plain_text", "") for t in rich_text])
+            if text:
+                if btype == "heading_1": content.append(f"# {text}")
+                elif btype == "heading_2": content.append(f"## {text}")
+                elif btype == "heading_3": content.append(f"### {text}")
+                elif btype == "bulleted_list_item": content.append(f"- {text}")
+                elif btype == "numbered_list_item": content.append(f"1. {text}")
+                elif btype == "to_do": 
+                    check = "x" if block.get("to_do", {}).get("checked") else " "
+                    content.append(f"- [{check}] {text}")
+                elif btype == "code": content.append(f"```\n{text}\n```")
+                else: content.append(text)
+        
+        return "\n\n".join(content)
+    except Exception:
+        return ""
