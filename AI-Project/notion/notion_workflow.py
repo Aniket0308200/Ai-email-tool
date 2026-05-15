@@ -321,8 +321,9 @@ def render_notion_listing():
         
         with l_row[0]:
             # Display current limit (can be a number input for direct typing)
+            # Remove key to avoid "modified after instantiation" error
             curr_val = st.number_input("Limit", value=st.session_state.notion_limit_val, 
-                                        min_value=1, max_value=500, label_visibility="collapsed", key="notion_limit_manual_input")
+                                        min_value=1, max_value=500, label_visibility="collapsed")
             if curr_val != st.session_state.notion_limit_val:
                 st.session_state.notion_limit_val = curr_val
                 st.rerun()
@@ -342,13 +343,17 @@ def render_notion_listing():
             with st.popover("", use_container_width=True):
                 st.markdown("**Quick Select**")
                 if st.button("10", key="notion_l_10", use_container_width=True):
-                    st.session_state.notion_limit_val = 10; st.rerun()
+                    st.session_state.notion_limit_val = 10
+                    st.rerun()
                 if st.button("20", key="notion_l_20", use_container_width=True):
-                    st.session_state.notion_limit_val = 20; st.rerun()
+                    st.session_state.notion_limit_val = 20
+                    st.rerun()
                 if st.button("50", key="notion_l_50", use_container_width=True):
-                    st.session_state.notion_limit_val = 50; st.rerun()
+                    st.session_state.notion_limit_val = 50
+                    st.rerun()
                 if st.button("All", key="notion_l_all", use_container_width=True):
-                    st.session_state.notion_limit_val = 500; st.rerun()
+                    st.session_state.notion_limit_val = 500
+                    st.rerun()
                     
         limit = st.session_state.notion_limit_val
 
@@ -416,6 +421,7 @@ def render_notion_listing():
             
             st.session_state.notion_listing_items = items
             st.session_state.notion_listing_last_type = specific_type
+            st.session_state.notion_listing_page = 1 # Reset to page 1 on new fetch
 
     items = st.session_state.get("notion_listing_items", [])
     
@@ -444,24 +450,30 @@ def render_notion_listing():
     items.sort(key=lambda x: x.get("created_time", ""), reverse=(sort_order == "Newest First"))
     
     # Limit
-    display_limit = limit
-    display_items = items[:display_limit]
-
-    # 3. Render Items in Table Format
-    st.markdown(f"**Results: {st.session_state.get('notion_listing_last_type', specific_type)}**")
+    display_items = items[:limit]
     
-    # Table Header
-    h_cols = st.columns([0.4, 2.5, 1.5, 1.5, 3, 0.8])
-    headers = ["#", "Page Name", "Created By", "Date & Time", "Content Preview", "Action"]
-    for col, h in zip(h_cols, headers):
-        col.markdown(f"**{h}**")
-    st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #333'>", unsafe_allow_html=True)
+    # Pagination logic
+    items_per_page = 10
+    total_items = len(display_items)
+    total_pages = (total_items + items_per_page - 1) // items_per_page
+    
+    if "notion_listing_page" not in st.session_state:
+        st.session_state.notion_listing_page = 1
+    
+    # Ensure current page is valid
+    if st.session_state.notion_listing_page > total_pages and total_pages > 0:
+        st.session_state.notion_listing_page = 1
+        
+    start_idx = (st.session_state.notion_listing_page - 1) * items_per_page
+    end_idx = min(start_idx + items_per_page, total_items)
+    page_items = display_items[start_idx:end_idx]
 
-    for i, item in enumerate(display_items):
+    for i, item in enumerate(page_items):
+        actual_idx = start_idx + i
         r_cols = st.columns([0.4, 2.5, 1.5, 1.5, 3, 0.8])
         
         with r_cols[0]:
-            st.write(f"{i+1}")
+            st.write(f"{actual_idx+1}")
         
         with r_cols[1]:
             st.markdown(f"**{item.get('title', 'Untitled')}**")
@@ -488,10 +500,33 @@ def render_notion_listing():
                 st.session_state.notion_viewing_title = item['title']
                 st.rerun()
 
-        if i < len(display_items) - 1:
+        if i < len(page_items) - 1:
             st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #222'>", unsafe_allow_html=True)
 
-    st.caption(f"Showing {len(display_items)} of {len(items)} items.")
+    st.caption(f"Showing {start_idx+1}-{end_idx} of {total_items} items (Page {st.session_state.notion_listing_page}/{total_pages})")
+
+    # Pagination Controls
+    if total_pages > 1:
+        st.divider()
+        p_col1, p_col2, p_col3, p_col4, p_col5 = st.columns([1, 1, 2, 1, 1])
+        with p_col1:
+            if st.button("⏪ First", disabled=(st.session_state.notion_listing_page == 1), use_container_width=True):
+                st.session_state.notion_listing_page = 1
+                st.rerun()
+        with p_col2:
+            if st.button("⬅️ Prev", disabled=(st.session_state.notion_listing_page == 1), use_container_width=True):
+                st.session_state.notion_listing_page -= 1
+                st.rerun()
+        with p_col3:
+            st.markdown(f"<div style='text-align:center; font-weight:600; padding: 5px;'>Page {st.session_state.notion_listing_page} of {total_pages}</div>", unsafe_allow_html=True)
+        with p_col4:
+            if st.button("Next ➡️", disabled=(st.session_state.notion_listing_page == total_pages), use_container_width=True):
+                st.session_state.notion_listing_page += 1
+                st.rerun()
+        with p_col5:
+            if st.button("Last ⏩", disabled=(st.session_state.notion_listing_page == total_pages), use_container_width=True):
+                st.session_state.notion_listing_page = total_pages
+                st.rerun()
 
     # 4. Detailed View Modal (Overlay)
     if st.session_state.get("notion_viewing_id"):
