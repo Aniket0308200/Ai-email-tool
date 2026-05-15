@@ -1,4 +1,4 @@
-﻿import re
+import re
 import streamlit as st
 from datetime import datetime
 from notion.notion_handler import (
@@ -6,9 +6,7 @@ from notion.notion_handler import (
     create_notion_page, get_authenticated_user, clear_authentication,
     _load_config, _save_config, generate_page_content, refine_direct_content,
     get_existing_pages, get_page_preview, get_notion_databases,
-    get_database_items, list_page_children, update_page_title,
-    archive_notion_page, delete_notion_page_permanent, update_page_content,
-    duplicate_notion_page, get_page_full_content, search_notion,
+    get_database_items, list_page_children,
 )
 
 FORMATTING_OPTIONS = {
@@ -63,7 +61,6 @@ def _init_state():
         "notion_parent_mode":"new_page","notion_selected_parent_id":None,
         "notion_selected_parent_name":"","notion_parent_selection_mode":False,
         "notion_confirm_cancel_parent":False,"notion_parent_selected":False,
-        "notion_permanent_deleted_ids":[],
     }
     for k,v in defaults.items():
         if k not in st.session_state:
@@ -88,19 +85,6 @@ def _reset_form():
     st.session_state.notion_confirm_cancel_parent=False
     st.session_state.notion_parent_selected=False
     st.session_state.notion_form_version+=1
-
-
-def _clear_notion_page_cache():
-    for key in [
-        "notion_listing_items", "notion_search_results", "notion_trash_items",
-        "notion_action_target", "notion_action_type"
-    ]:
-        if key in st.session_state:
-            del st.session_state[key]
-
-
-def _notion_hidden_page_ids() -> set:
-    return set(st.session_state.get("notion_permanent_deleted_ids", []))
 
 
 def _build_media_blocks(media_items: list, position: str = "end") -> str:
@@ -301,6 +285,7 @@ def render_notion_listing():
     col_l1, col_l2, col_l3 = st.columns([1.5, 1.5, 1.2])
     
     with col_l1:
+        # Use popover to fulfill the "click icon to open/close" behavior
         with st.popover("📁 Listing Category", use_container_width=True):
             listing_type = st.radio("Select Category", [
                 "General Page Listings", "Nested & Structure Listings", "Database Listings",
@@ -328,12 +313,15 @@ def render_notion_listing():
             specific_type = st.radio("Select View", sub_types.get(listing_type, ["Total Pages"]), key="notion_listing_subtype_radio")
     
     with col_l3:
+        # Integrated Listing Limit UI
         if "notion_limit_val" not in st.session_state:
             st.session_state.notion_limit_val = 10
             
         l_row = st.columns([1.5, 0.8, 0.8, 1.2])
         
         with l_row[0]:
+            # Display current limit (can be a number input for direct typing)
+            # Remove key to avoid "modified after instantiation" error
             curr_val = st.number_input("Limit", value=st.session_state.notion_limit_val, 
                                         min_value=1, max_value=500, label_visibility="collapsed")
             if curr_val != st.session_state.notion_limit_val:
@@ -351,6 +339,7 @@ def render_notion_listing():
                 st.rerun()
                 
         with l_row[3]:
+            # Dropdown for fixed options
             with st.popover("", use_container_width=True):
                 st.markdown("**Quick Select**")
                 if st.button("10", key="notion_l_10", use_container_width=True):
@@ -368,6 +357,7 @@ def render_notion_listing():
                     
         limit = st.session_state.notion_limit_val
 
+    # Search & Sorting Row
     col_s1, col_s2, col_s3 = st.columns([2, 1, 1])
     with col_s1:
         search_query = st.text_input("🔍 Search Keyword", placeholder="Search in title...", key="notion_listing_search")
@@ -378,6 +368,7 @@ def render_notion_listing():
         st.write("")
         fetch_clicked = st.button("📥 Fetch Data", use_container_width=True, key="notion_fetch_listing_btn")
 
+    # Parent Selection for Nested (only if triggered or in state)
     parent_id_for_nested = st.session_state.get("notion_listing_parent_id")
     if specific_type in ["Pages Inside a Page", "Subpages", "Child Pages", "Database Items"]:
         st.markdown(f"**Target Selection for {specific_type}:**")
@@ -433,13 +424,7 @@ def render_notion_listing():
             st.session_state.notion_listing_page = 1 # Reset to page 1 on new fetch
 
     items = st.session_state.get("notion_listing_items", [])
-    deleted_ids = _notion_hidden_page_ids()
-
-    if specific_type == "Archived Pages":
-        items = [p for p in items if p.get("archived") and p.get("id") not in deleted_ids]
-    else:
-        items = [p for p in items if not p.get("archived") and p.get("id") not in deleted_ids]
-
+    
     # Filter by Search Query
     if search_query:
         items = [p for p in items if search_query.lower() in p.get("title", "").lower()]
@@ -461,8 +446,15 @@ def render_notion_listing():
             st.rerun()
         return
 
-    # Sort
-    items.sort(key=lambda x: x.get("last_edited_time", ""), reverse=(sort_order == "Newest First"))
+    # Filter out permanently deleted IDs and archived pages (unless specifically requested)
+    hidden_ids = _notion_hidden_page_ids()
+    items = [p for p in items if p.get("id") not in hidden_ids]
+    if specific_type != "Archived Pages":
+        items = [p for p in items if not p.get("archived")]
+
+    # Sort: Requested "newest-to-oldest based on updated date/time"
+    items.sort(key=lambda x: x.get("last_edited_time" if sort_order == "Newest First" else "created_time", ""), 
+               reverse=(sort_order == "Newest First"))
     
     # Limit
     display_items = items[:limit]
@@ -484,11 +476,12 @@ def render_notion_listing():
     page_items = display_items[start_idx:end_idx]
 
     # Table Header
+    st.markdown("<br>", unsafe_allow_html=True)
     h_cols = st.columns([0.4, 2.5, 1.5, 1.5, 3, 0.8])
-    headers = ["#", "Page Name", "Owner", "Last Updated", "Snippet", "Actions"]
+    headers = ["#", "Page Name", "Author", "Updated At", "Snippet", ""]
     for col, h in zip(h_cols, headers):
         col.markdown(f"**{h}**")
-    st.divider()
+    st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #333'>", unsafe_allow_html=True)
 
     for i, item in enumerate(page_items):
         actual_idx = start_idx + i
@@ -517,10 +510,37 @@ def render_notion_listing():
                 st.caption("_(no preview)_")
                 
         with r_cols[5]:
-            if st.button("👁️", key=f"vbtn_{item['id']}_{i}", help="View Details"):
-                st.session_state.notion_viewing_id = item['id']
-                st.session_state.notion_viewing_title = item['title']
-                st.rerun()
+            with st.popover("⋮", key=f"l_pop_{item['id']}_{i}", use_container_width=True):
+                if st.button("👁️ View", key=f"l_v_{item['id']}", use_container_width=True):
+                    st.session_state.notion_viewing_id = item['id']
+                    st.session_state.notion_viewing_title = item['title']
+                    st.rerun()
+                if st.button("📝 Edit", key=f"l_e_{item['id']}", use_container_width=True):
+                    from notion.notion_handler import get_page_full_content
+                    st.session_state.notion_edit_target = item
+                    st.session_state.notion_edit_content = get_page_full_content(item['id'])
+                    st.session_state.notion_action_type = "edit_page"
+                    st.rerun()
+                if st.button("✏️ Rename", key=f"l_r_{item['id']}", use_container_width=True):
+                    st.session_state.notion_action_target = item
+                    st.session_state.notion_action_type = "rename"
+                    st.rerun()
+                if st.button("⭐ Favorite", key=f"l_f_{item['id']}", use_container_width=True):
+                    st.toast("Added to Favorites!")
+                if st.button("📋 Duplicate", key=f"l_d_{item['id']}", use_container_width=True):
+                    st.session_state.notion_action_target = item
+                    st.session_state.notion_action_type = "duplicate_confirm"
+                    st.rerun()
+                if st.button("🔗 Copy Link", key=f"l_c_{item['id']}", use_container_width=True):
+                    st.code(item['url'])
+                    st.toast("Link ready to copy!")
+                if st.button("🗑️ Delete", key=f"l_del_{item['id']}", use_container_width=True):
+                    st.session_state.notion_action_target = item
+                    st.session_state.notion_action_type = "delete_choice"
+                    st.rerun()
+
+    if st.session_state.get("notion_action_type"):
+        _render_action_modals()
 
         if i < len(page_items) - 1:
             st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #222'>", unsafe_allow_html=True)
@@ -550,458 +570,34 @@ def render_notion_listing():
                 st.session_state.notion_listing_page = total_pages
                 st.rerun()
 
-    # 4. Detailed View Modal (Overlay)
-    if st.session_state.get("notion_viewing_id"):
-        _render_view_overlay()
 
 
-def render_notion_searching():
-    """Complete Searching System with filters, sorting, and action menu."""
-    if "notion_search_results" not in st.session_state:
-        st.session_state.notion_search_results = []
-    if "notion_search_page" not in st.session_state:
-        st.session_state.notion_search_page = 1
-    if "notion_search_limit" not in st.session_state:
-        st.session_state.notion_search_limit = 10
-
-    st.markdown("### 🔍 Searching System")
-    st.caption("Powerful global search with smart filtering and page management.")
-
-    col1, col2, col3 = st.columns([2, 1, 1])
-    with col1:
-        q = st.text_input("🔍 Global Smart Search", placeholder="Search by title, keyword, content...", key="notion_global_search_q")
-    with col2:
-        sort_order = st.radio("Sort Order", ["Newest First", "Oldest First"], key="notion_search_sort", horizontal=True)
-    with col3:
-        st.write("")
-        st.write("")
-        if st.button("🚀 Search Now", use_container_width=True, key="notion_global_search_btn"):
-            with st.spinner("Searching workspace..."):
-                search_category = st.session_state.get("notion_search_category", "General Search")
-                if "AI" in search_category or "Smart" in search_category:
-                    # AI Semantic Search Placeholder Logic
-                    all_res = get_existing_pages()
-                    all_pages = all_res.get("pages", [])
-                    st.session_state.notion_search_results = [p for p in all_pages if q.lower() in p['title'].lower()][:20]
-                else:
-                    res = search_notion(q)
-                    if res.get("success"):
-                        st.session_state.notion_search_results = res.get("data", [])
-                    else:
-                        st.error(f"Search failed: {res.get('error')}")
-                st.session_state.notion_search_page = 1
-
-    with st.expander("🛠️ Advanced Search Filters", expanded=False):
-        f_col1, f_col2, f_col3 = st.columns(3)
-        with f_col1:
-            st.markdown("**Search Type**")
-            s_type = st.selectbox("Type", [
-                "General Search", "Nested/Search Structure", "Database Search", "Task Search",
-                "Date & Time Search", "User & Collaboration Search", "Metadata Search",
-                "Notes & Documentation Search", "Content Block Search", "Advanced Query Search",
-                "Special Search", "AI-Powered Smart Search"
-            ], key="notion_search_category")
-        with f_col2:
-            st.markdown("**Sub-Type**")
-            sub_types = {
-                "General Search": ["Search Page by Title", "Search Page by Keyword", "Search Page by Content", "Search Recent Pages", "Search Favorite Pages", "Search Archived Pages", "Search Shared Pages", "Search Private Pages"],
-                "Nested/Search Structure": ["Search Pages Inside a Page", "Search Subpages", "Search Nested Pages"],
-                "Database Search": ["Search Database by Name", "Search Database Items"],
-                "Task Search": ["Search Task by Status", "Search Completed Tasks", "Search Pending Tasks", "Search Overdue Tasks"],
-                "AI-Powered Smart Search": ["AI Semantic Search", "Contextual Search", "Similarity Search", "Smart Document Search", "Natural Language Search"]
-            }
-            st.selectbox("Sub-Type", sub_types.get(s_type, ["All"]), key="notion_search_subtype")
-        with f_col3:
-            st.markdown("**Limit & Paging**")
-            limit = st.number_input("Result Limit", value=st.session_state.notion_search_limit, min_value=1, max_value=500)
-            st.session_state.notion_search_limit = limit
-
-    st.divider()
-    results = st.session_state.notion_search_results
-    if not results:
-        st.info("💡 Type a query and click **Search Now** to find Notion pages.")
-        return
-
-    deleted_ids = _notion_hidden_page_ids()
-    search_subtype = st.session_state.get("notion_search_subtype", "")
-    search_category = st.session_state.get("notion_search_category", "")
-    if "Archived" not in search_subtype and "Archived" not in search_category:
-        results = [p for p in results if not p.get("archived") and p.get("id") not in deleted_ids]
-    else:
-        results = [p for p in results if p.get("id") not in deleted_ids]
-
-    # Client-side sorting & paging
-    results.sort(key=lambda x: x.get("last_edited_time", ""), reverse=(sort_order == "Newest First"))
-    display_results = results[:st.session_state.notion_search_limit]
-    items_per_page = 10
-    total_items = len(display_results)
-    total_pages = (total_items + items_per_page - 1) // items_per_page
+def _render_view_overlay():
+    page_id = st.session_state.notion_viewing_id
+    title = st.session_state.notion_viewing_title
     
-    start_idx = (st.session_state.notion_search_page - 1) * items_per_page
-    end_idx = min(start_idx + items_per_page, total_items)
-    page_items = display_results[start_idx:end_idx]
-
-    # Results Table
-    h_cols = st.columns([0.4, 2.5, 1.5, 1.5, 2.5, 0.8])
-    for col, h in zip(h_cols, ["#", "Page Name", "Owner", "Last Updated", "Snippet", "Actions"]):
-        col.markdown(f"**{h}**")
-    st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #333'>", unsafe_allow_html=True)
-
-    for i, item in enumerate(page_items):
-        r_cols = st.columns([0.4, 2.5, 1.5, 1.5, 2.5, 0.8])
-        with r_cols[0]: st.write(f"{start_idx + i + 1}")
-        with r_cols[1]: st.markdown(f"**{item.get('title', 'Untitled')}**")
-        with r_cols[2]: st.write(item.get("created_by", "User"))
-        with r_cols[3]: st.caption(item.get("last_edited_time", "").replace("T", " ").split(".")[0])
-        with r_cols[4]: st.caption(get_page_preview(item['id']))
-        with r_cols[5]:
-            with st.popover("⋮", use_container_width=True):
-                if st.button("👁️ View", key=f"s_v_{item['id']}", use_container_width=True):
-                    st.session_state.notion_action_target, st.session_state.notion_action_type = item, "view"; st.rerun()
-                if st.button("✏️ Edit", key=f"s_e_{item['id']}", use_container_width=True):
-                    st.session_state.notion_action_target, st.session_state.notion_action_type = item, "edit"; st.rerun()
-                if st.button("📝 Rename", key=f"s_r_{item['id']}", use_container_width=True):
-                    st.session_state.notion_action_target, st.session_state.notion_action_type = item, "rename"; st.rerun()
-                if st.button("📋 Duplicate", key=f"s_d_{item['id']}", use_container_width=True):
-                    st.session_state.notion_action_target, st.session_state.notion_action_type = item, "duplicate"; st.rerun()
-                if st.button("⭐ Favorite", key=f"s_f_{item['id']}", use_container_width=True):
-                    st.session_state.notion_action_target, st.session_state.notion_action_type = item, "favorite"; st.rerun()
-                if st.button("🔗 Copy Link", key=f"s_l_{item['id']}", use_container_width=True):
-                    st.session_state.notion_action_target, st.session_state.notion_action_type = item, "copy_link"; st.rerun()
-                if st.button("🗑️ Delete", key=f"s_t_{item['id']}", use_container_width=True):
-                    st.session_state.notion_action_target, st.session_state.notion_action_type = item, "delete_choice"; st.rerun()
-        if i < len(page_items) - 1:
-            st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #222'>", unsafe_allow_html=True)
-
-    # Pagination Controls
-    if total_pages > 1:
-        st.divider()
-        p_col1, p_col2, p_col3, p_col4, p_col5 = st.columns([1, 1, 2, 1, 1])
-        with p_col1:
-            if st.button("⏪", key="s_pg_first", disabled=(st.session_state.notion_search_page == 1)):
-                st.session_state.notion_search_page = 1; st.rerun()
-        with p_col2:
-            if st.button("⬅️", key="s_pg_prev", disabled=(st.session_state.notion_search_page == 1)):
-                st.session_state.notion_search_page -= 1; st.rerun()
-        with p_col3:
-            st.markdown(f"<div style='text-align:center; font-weight:600;'>Page {st.session_state.notion_search_page} of {total_pages}</div>", unsafe_allow_html=True)
-        with p_col4:
-            if st.button("➡️", key="s_pg_next", disabled=(st.session_state.notion_search_page == total_pages)):
-                st.session_state.notion_search_page += 1; st.rerun()
-        with p_col5:
-            if st.button("⏩", key="s_pg_last", disabled=(st.session_state.notion_search_page == total_pages)):
-                st.session_state.notion_search_page = total_pages; st.rerun()
-
-    if st.session_state.get("notion_action_type"):
-        _render_action_modals()
-
-def render_notion_trash():
-    """Trash section for archived pages."""
-    st.markdown("### 🗑️ Trash System")
-    st.caption("Manage archived pages. Restore them or delete permanently.")
-    
-    deleted_ids = _notion_hidden_page_ids()
-    if "notion_trash_items" not in st.session_state or st.button("🔄 Refresh Trash"):
-        res = get_existing_pages()
-        st.session_state.notion_trash_items = [
-            p for p in res.get("pages", [])
-            if p.get("archived") and p.get("id") not in deleted_ids
-        ]
-    
-    trash_items = st.session_state.notion_trash_items
-    if not trash_items:
-        st.success("✨ Your Trash is empty!")
-        return
-        
-    st.markdown(f"**Found {len(trash_items)} pages in Trash**")
-    
-    # Table Header
-    h_cols = st.columns([0.4, 3, 2, 2])
-    for col, h in zip(h_cols, ["#", "Page Name", "Trashed Date", "Actions"]):
-        col.markdown(f"**{h}**")
-    st.divider()
-    
-    for i, item in enumerate(trash_items):
-        r_cols = st.columns([0.4, 3, 2, 2])
-        with r_cols[0]: st.write(f"{i+1}")
-        with r_cols[1]: st.markdown(f"**{item['title']}**")
-        with r_cols[2]: st.caption(item['last_edited_time'].replace("T", " ").split(".")[0])
-        with r_cols[3]:
-            c1, c2 = st.columns(2)
-            if c1.button("♻️ Restore", key=f"restore_{item['id']}", use_container_width=True):
-                st.session_state.notion_trash_target = item
-                st.session_state.notion_trash_action = "restore"
-                st.rerun()
-            if c2.button("🔥 Delete", key=f"perm_del_{item['id']}", use_container_width=True):
-                st.session_state.notion_trash_target = item
-                st.session_state.notion_trash_action = "delete_perm"
-                st.rerun()
-        if i < len(trash_items) - 1:
-            st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #222'>", unsafe_allow_html=True)
-
-    if st.session_state.get("notion_trash_action"):
-        _render_trash_modals()
-
-def _render_trash_modals():
-    action = st.session_state.notion_trash_action
-    item = st.session_state.notion_trash_target
-    
-    if action == "restore":
-        st.markdown(f"### ♻️ Restore Page")
-        st.write(f"Do you want to restore **{item['title']}**?")
-        c1, c2 = st.columns(2)
-        if c1.button("Yes, Restore", use_container_width=True):
-            archive_notion_page(item['id'], archive=False)
-            st.success("Page restored!")
-            _clear_notion_page_cache()
-            st.session_state.notion_trash_action = None
-            st.rerun()
-        if c2.button("No", use_container_width=True):
-            st.session_state.notion_trash_action = None
-            st.rerun()
-            
-    elif action == "delete_perm":
-        st.markdown(f"### 🔥 Permanent Delete")
-        st.error(f"Do you want to permanently delete **{item['title']}**?")
-        st.caption("This action cannot be undone.")
-        c1, c2 = st.columns(2)
-        if c1.button("Yes, DELETE FOREVER", use_container_width=True):
-            response = delete_notion_page_permanent(item['id'])
-            if response.get("success"):
-                st.success("Deleted permanently!")
-            else:
-                st.error(f"Delete failed: {response.get('error')}")
-            if "notion_permanent_deleted_ids" not in st.session_state:
-                st.session_state.notion_permanent_deleted_ids = []
-            st.session_state.notion_permanent_deleted_ids.append(item['id'])
-            _clear_notion_page_cache()
-            st.session_state.notion_trash_action = None
-            st.rerun()
-        if c2.button("Cancel", use_container_width=True):
-            st.session_state.notion_trash_action = None
-            st.rerun()
-
-def _render_action_modals():
-    action, item = st.session_state.notion_action_type, st.session_state.notion_action_target
     st.markdown("---")
-    
-    if action == "view":
-        sc1, sc2 = st.columns([5, 1])
-        sc1.subheader(f"👁️ Viewing: {item['title']}")
-        if sc2.button("Close", key="close_view_modal"):
-            st.session_state.notion_action_type = None; st.rerun()
-        st.markdown(f"<div style='background:#121212; padding:20px; border-radius:10px; border:1px solid #444'>{get_page_full_content(item['id'])}</div>", unsafe_allow_html=True)
-        
-    elif action == "edit":
-        st.subheader(f"✏️ Editing Content: {item['title']}")
-        new_text = st.text_area("Content", value=get_page_full_content(item['id']), height=300)
-        c1, c2 = st.columns(2)
-        if c1.button("💾 Save Changes", use_container_width=True):
-            update_page_content(item['id'], new_text)
-            st.success("Content updated!")
-            st.session_state.notion_action_type = None
-            # Trigger refresh of search results
-            if "notion_global_search_q" in st.session_state:
-                res = search_notion(st.session_state.notion_global_search_q)
-                st.session_state.notion_search_results = res.get("data", [])
+    c1, c2 = st.columns([5, 1])
+    with c1:
+        st.subheader(f"📖 Viewing: {title}")
+    with c2:
+        if st.button("Close", key="close_notion_view"):
+            st.session_state.notion_viewing_id = None
             st.rerun()
-        if c2.button("Cancel", use_container_width=True):
-            st.session_state.notion_action_type = None; st.rerun()
             
-    elif action == "rename":
-        st.subheader(f"📝 Rename Title: {item['title']}")
-        new_title = st.text_input("New Title", value=item['title'])
-        c1, c2 = st.columns(2)
-        if c1.button("✅ Confirm Rename", use_container_width=True):
-            update_page_title(item['id'], new_title)
-            st.success("Title updated!")
-            st.session_state.notion_action_type = None
-            if "notion_global_search_q" in st.session_state:
-                res = search_notion(st.session_state.notion_global_search_q)
-                st.session_state.notion_search_results = res.get("data", [])
-            st.rerun()
-        if c2.button("Cancel", use_container_width=True):
-            st.session_state.notion_action_type = None; st.rerun()
-            
-    elif action == "duplicate":
-        with st.spinner("🚀 Duplicating page..."):
-            res = duplicate_notion_page(item['id'])
-            if res.get("success"):
-                st.success("Page duplicated!")
-                st.session_state.notion_action_type = None
-                if "notion_global_search_q" in st.session_state:
-                    res = search_notion(st.session_state.notion_global_search_q)
-                    st.session_state.notion_search_results = res.get("data", [])
-                st.rerun()
-            else:
-                st.error(f"Duplicate failed: {res.get('error')}")
-                st.session_state.notion_action_type = None
-                
-    elif action == "favorite":
-        st.success(f"⭐ **{item['title']}** added to favorites!")
-        st.session_state.notion_action_type = None
-        st.rerun()
-        
-    elif action == "copy_link":
-        st.subheader(f"🔗 Copy Link")
-        st.code(item['url'])
-        if st.button("Close"):
-            st.session_state.notion_action_type = None; st.rerun()
-            
-    elif action == "delete_choice":
-        st.markdown("""
-        <style>
-        .notion-delete-overlay {
-            position: fixed;
-            inset: 0;
-            background: rgba(0, 0, 0, 0.65);
-            backdrop-filter: blur(4px);
-            -webkit-backdrop-filter: blur(4px);
-            z-index: 999999;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .notion-delete-card {
-            background: #0f172a;
-            border: 1px solid rgba(148, 163, 184, 0.18);
-            border-radius: 18px;
-            padding: 28px 28px 20px;
-            width: min(460px, 92%);
-            box-shadow: 0 30px 80px rgba(15, 23, 42, 0.5);
-            color: #e2e8f0;
-            text-align: center;
-            font-family: Inter, sans-serif;
-        }
-        .notion-delete-card h2 {
-            margin: 0 0 10px;
-            font-size: 24px;
-            letter-spacing: -0.02em;
-        }
-        .notion-delete-card p {
-            margin: 0 0 22px;
-            color: #cbd5e1;
-            line-height: 1.6;
-            font-size: 15px;
-        }
-        .notion-delete-actions {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
-            gap: 12px;
-        }
-        .notion-delete-actions button {
-            min-width: 130px;
-            border-radius: 12px;
-            border: none;
-            padding: 12px 16px;
-            font-size: 14px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: transform 0.15s ease, opacity 0.15s ease;
-        }
-        .notion-delete-actions button:hover { transform: translateY(-1px); }
-        .notion-delete-actions .cancel-btn { background: #1f2937; color: #e2e8f0; }
-        .notion-delete-actions .trash-btn { background: #2563eb; color: white; }
-        .notion-delete-actions .perm-btn { background: linear-gradient(135deg,#ef4444,#b91c1c); color: white; }
-        button[aria-label="DELETE_MODAL_CANCEL"],
-        button[aria-label="DELETE_MODAL_TRASH"],
-        button[aria-label="DELETE_MODAL_PERM"] {
-            display: none !important;
-        }
-        </style>
-        <div class='notion-delete-overlay' id='notion-delete-overlay'>
-            <div class='notion-delete-card'>
-                <div style='font-size:34px;margin-bottom:12px;'>🗑️</div>
-                <h2>Delete Page</h2>
-                <p>Do you want to delete or trash this page?</p>
-                <div class='notion-delete-actions'>
-                    <button class='cancel-btn' id='notion-delete-cancel'>Cancel</button>
-                    <button class='trash-btn' id='notion-delete-trash'>Trash</button>
-                    <button class='perm-btn' id='notion-delete-perm'>Delete Permanently</button>
-                </div>
-            </div>
+    with st.spinner("Fetching page content..."):
+        # We can reuse _render_rich_preview if we get the markdown
+        # But get_page_preview only gets a snippet.
+        # Let's add a full page fetcher or just show the snippet for now.
+        preview = get_page_preview(page_id, max_lines=20)
+        st.markdown(f"""
+        <div style='background: #0f0f0f; border: 1px solid #6c63ff; border-radius: 12px; padding: 25px; min-height: 200px;'>
+            {preview if preview else "*(No content or could not fetch)*"}
         </div>
-        <script>
-        (function() {
-            var doc = window.parent.document;
-            if (doc.getElementById('notion-delete-overlay-script')) return;
-            var scriptMarker = doc.createElement('div');
-            scriptMarker.id = 'notion-delete-overlay-script';
-            doc.body.appendChild(scriptMarker);
-
-            function clickHidden(label) {
-                var tries = 0;
-                function attempt() {
-                    var buttons = doc.querySelectorAll('button');
-                    for (var i = 0; i < buttons.length; i++) {
-                        var b = buttons[i];
-                        if (b.innerText.trim() === label) {
-                            b.click();
-                            return;
-                        }
-                    }
-                    if (tries < 20) {
-                        tries += 1;
-                        setTimeout(attempt, 100);
-                    }
-                }
-                attempt();
-            }
-
-            var cancelBtn = doc.getElementById('notion-delete-cancel');
-            var trashBtn = doc.getElementById('notion-delete-trash');
-            var permBtn = doc.getElementById('notion-delete-perm');
-            var overlay = doc.getElementById('notion-delete-overlay');
-
-            if (cancelBtn) cancelBtn.onclick = function() {
-                overlay.remove();
-                clickHidden('DELETE_MODAL_CANCEL');
-            };
-            if (trashBtn) trashBtn.onclick = function() {
-                overlay.remove();
-                clickHidden('DELETE_MODAL_TRASH');
-            };
-            if (permBtn) permBtn.onclick = function() {
-                overlay.remove();
-                clickHidden('DELETE_MODAL_PERM');
-            };
-        })();
-        </script>
         """, unsafe_allow_html=True)
+        
+        st.markdown(f"[Open in Notion ↗](https://www.notion.so/{page_id.replace('-', '')})")
 
-        if st.button("DELETE_MODAL_CANCEL", key="del_cancel_hidden"):
-            st.session_state.notion_action_type = None
-            st.rerun()
-
-        if st.button("DELETE_MODAL_TRASH", key="del_trash_hidden"):
-            with st.spinner("Moving to trash..."):
-                archive_notion_page(item['id'], archive=True)
-                st.success("Moved to Trash!")
-                _clear_notion_page_cache()
-                if "notion_global_search_q" in st.session_state and st.session_state.notion_global_search_q:
-                    res = search_notion(st.session_state.notion_global_search_q)
-                    if res.get("success"):
-                        st.session_state.notion_search_results = res.get("data", [])
-                st.rerun()
-
-        if st.button("DELETE_MODAL_PERM", key="del_perm_hidden"):
-            with st.spinner("Deleting permanently..."):
-                response = delete_notion_page_permanent(item['id'])
-                if response.get("success"):
-                    st.success("Deleted permanently!")
-                else:
-                    st.error(f"Delete failed: {response.get('error')}")
-                if "notion_permanent_deleted_ids" not in st.session_state:
-                    st.session_state.notion_permanent_deleted_ids = []
-                st.session_state.notion_permanent_deleted_ids.append(item['id'])
-                _clear_notion_page_cache()
-                if "notion_global_search_q" in st.session_state and st.session_state.notion_global_search_q:
-                    res = search_notion(st.session_state.notion_global_search_q)
-                    if res.get("success"):
-                        st.session_state.notion_search_results = res.get("data", [])
-                st.session_state.notion_action_type = None
-                st.rerun()
 
 def render_notion_workflow():
     st.markdown('<div class="page-title">📝 Notion AI Agent</div>', unsafe_allow_html=True)
@@ -1017,7 +613,9 @@ def render_notion_workflow():
             else:
                 st.error("❌ Failed to connect Notion.")
 
-    tab_agent, tab_listing, tab_searching, tab_trash, tab_settings = st.tabs(["🤖 Create Page", "📋 Listing", "🔍 Searching", "🗑️ Trash", "⚙️ Settings"])
+    tab_agent, tab_listing, tab_searching, tab_trash, tab_settings = st.tabs([
+        "🤖 Create Page", "📋 Listing", "🔍 Searching", "🗑️ Trash", "⚙️ Settings"
+    ])
 
     # ── Settings ───────────────────────────────────────────────────────────────
     with tab_settings:
@@ -1049,10 +647,6 @@ def render_notion_workflow():
                 st.link_button("🔓 Connect Notion", auth_url, use_container_width=True)
             else:
                 st.warning("Configure Client ID and Redirect URL first.")
-        
-        # Metadata / Project Stats
-        st.divider()
-        st.caption("Notion AI Agent v2.5 | Searching & Trash System Enabled")
 
     # ── Listing tab ────────────────────────────────────────────────────────────
     with tab_listing:
@@ -1066,7 +660,7 @@ def render_notion_workflow():
         if not is_notion_authenticated():
             st.warning("⚠️ Connect your Notion account in Settings first.")
         else:
-            render_notion_searching()
+            render_notion_search()
 
     # ── Trash tab ──────────────────────────────────────────────────────────────
     with tab_trash:
@@ -1697,3 +1291,475 @@ def render_notion_workflow():
                     st.rerun()
 
         _render_history()
+
+    # Global Modal Overlays
+    if st.session_state.get("notion_viewing_id"):
+        _render_view_overlay()
+
+def _clear_notion_page_cache():
+    """Clear cached page data to force fresh fetch."""
+    keys = ["notion_listing_items", "notion_search_results", "notion_trash_items"]
+    for k in keys:
+        if k in st.session_state:
+            del st.session_state[k]
+
+def _notion_hidden_page_ids():
+    """Get IDs of pages that should be hidden (permanently deleted in UI)."""
+    if "notion_permanent_deleted_ids" not in st.session_state:
+        st.session_state.notion_permanent_deleted_ids = []
+    return st.session_state.notion_permanent_deleted_ids
+
+def render_notion_search():
+    """Global Smart Search with pagination and 3-dot menu."""
+    st.markdown("### 🔍 Global Smart Search")
+    st.caption("Search across all pages, databases, and content in your workspace.")
+
+    s_col1, s_col2, s_col3 = st.columns([3, 1, 1])
+    with s_col1:
+        query = st.text_input("🔍 Search keyword or phrase...", placeholder="Type anything...", key="notion_global_search_input")
+    with s_col2:
+        st.write("")
+        st.write("")
+        search_btn = st.button("Search Now", use_container_width=True, key="notion_global_search_btn")
+    with s_col3:
+        st.write("")
+        st.write("")
+        if st.button("🔄 Refresh", use_container_width=True, key="refresh_search"):
+            _clear_notion_page_cache()
+            st.rerun()
+
+    hidden_ids = _notion_hidden_page_ids()
+    
+    with st.expander("🛠️ Advanced Search Filters", expanded=False):
+        f_col1, f_col2, f_col3 = st.columns(3)
+        with f_col1:
+            st.markdown("**Search Type**")
+            s_type = st.selectbox("Type", [
+                "General Search", "Nested/Search Structure", "Database Search", "Task Search",
+                "Date & Time Search", "User & Collaboration Search", "Metadata Search",
+                "Notes & Documentation Search", "Content Block Search", "Advanced Query Search",
+                "Special Search", "AI-Powered Smart Search"
+            ], key="notion_search_category")
+        with f_col2:
+            st.markdown("**Sub-Type**")
+            sub_types = {
+                "General Search": ["Search Page by Title", "Search Page by Keyword", "Search Page by Content", "Search Recent Pages", "Search Favorite Pages", "Search Archived Pages", "Search Shared Pages", "Search Private Pages"],
+                "Nested/Search Structure": ["Search Pages Inside a Page", "Search Subpages", "Search Nested Pages"],
+                "Database Search": ["Search Database by Name", "Search Database Items"],
+                "Task Search": ["Search Task by Status", "Search Completed Tasks", "Search Pending Tasks", "Search Overdue Tasks"],
+                "AI-Powered Smart Search": ["AI Semantic Search", "Contextual Search", "Similarity Search", "Smart Document Search", "Natural Language Search"]
+            }
+            st.selectbox("Sub-Type", sub_types.get(s_type, ["All"]), key="notion_search_subtype")
+        with f_col3:
+            st.markdown("**Limit & Paging**")
+            limit_val = st.number_input("Result Limit", value=st.session_state.get("notion_search_limit", 10), min_value=1, max_value=500)
+            st.session_state.notion_search_limit = limit_val
+
+    st.divider()
+    
+    if search_btn or (query and "notion_search_results" not in st.session_state):
+        with st.spinner("Searching Notion..."):
+            from notion.notion_handler import search_notion as api_search
+            res = api_search(query)
+            if res.get("success"):
+                results = [p for p in res.get("data", []) if not p.get("archived") and p.get("id") not in hidden_ids]
+                # Sort by last_edited_time newest first
+                results.sort(key=lambda x: x.get("last_edited_time", ""), reverse=True)
+                st.session_state.notion_search_results = results
+                st.session_state.notion_search_page = 1
+            else:
+                st.error(f"Search failed: {res.get('error')}")
+                return
+
+    results = st.session_state.get("notion_search_results", [])
+    if not results:
+        if query: st.info(f"No results found for '{query}'.")
+        return
+
+    # Table Header
+    st.markdown("<br>", unsafe_allow_html=True)
+    h_cols = st.columns([0.4, 3, 1.5, 2, 3, 0.6])
+    headers = ["#", "Page Name", "Author", "Updated At", "Snippet", ""]
+    for col, h in zip(h_cols, headers):
+        col.markdown(f"**{h}**")
+    st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #333'>", unsafe_allow_html=True)
+
+    # Pagination
+    items_per_page = 10
+    total = len(results)
+    total_pages = (total + items_per_page - 1) // items_per_page
+    curr_page = st.session_state.get("notion_search_page", 1)
+    
+    start = (curr_page - 1) * items_per_page
+    end = min(start + items_per_page, total)
+    page_items = results[start:end]
+
+    for i, item in enumerate(page_items):
+        r_cols = st.columns([0.4, 3, 1.5, 2, 3, 0.6])
+        idx = start + i + 1
+        with r_cols[0]: st.write(f"{idx}")
+        with r_cols[1]: st.markdown(f"**{item['title']}**")
+        with r_cols[2]: st.caption(item.get("created_by", "Unknown"))
+        with r_cols[3]: 
+            dt = item['last_edited_time'].replace("T", " ").split(".")[0]
+            st.caption(dt)
+        with r_cols[4]:
+            preview = get_page_preview(item['id'])
+            st.caption(preview or "_(no preview)_")
+        with r_cols[5]:
+            with st.popover("⋮", key=f"s_pop_{item['id']}_{idx}", use_container_width=True):
+                if st.button("👁️ View", key=f"s_v_{item['id']}", use_container_width=True):
+                    st.session_state.notion_viewing_id = item['id']
+                    st.session_state.notion_viewing_title = item['title']
+                    st.rerun()
+                if st.button("📝 Edit", key=f"s_e_{item['id']}", use_container_width=True):
+                    from notion.notion_handler import get_page_full_content
+                    st.session_state.notion_edit_target = item
+                    st.session_state.notion_edit_content = get_page_full_content(item['id'])
+                    st.session_state.notion_action_type = "edit_page"
+                    st.rerun()
+                if st.button("✏️ Rename", key=f"s_r_{item['id']}", use_container_width=True):
+                    st.session_state.notion_action_target = item
+                    st.session_state.notion_action_type = "rename"
+                    st.rerun()
+                if st.button("⭐ Favorite", key=f"s_f_{item['id']}", use_container_width=True):
+                    st.toast("Added to Favorites!")
+                if st.button("📋 Duplicate", key=f"s_d_{item['id']}", use_container_width=True):
+                    st.session_state.notion_action_target = item
+                    st.session_state.notion_action_type = "duplicate_confirm"
+                    st.rerun()
+                if st.button("🔗 Copy Link", key=f"s_c_{item['id']}", use_container_width=True):
+                    st.code(item['url'])
+                    st.toast("Link ready to copy!")
+                if st.button("🗑️ Delete", key=f"s_del_{item['id']}", use_container_width=True):
+                    st.session_state.notion_action_target = item
+                    st.session_state.notion_action_type = "delete_choice"
+                    st.rerun()
+        
+        if i < len(page_items) - 1:
+            st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #222'>", unsafe_allow_html=True)
+
+    # Pagination Controls
+    if total_pages > 1:
+        st.markdown("<br>", unsafe_allow_html=True)
+        pc1, pc2, pc3 = st.columns([1, 2, 1])
+        with pc1:
+            if st.button("⬅️ Previous", disabled=(curr_page == 1), key="prev_search"):
+                st.session_state.notion_search_page -= 1
+                st.rerun()
+        with pc2:
+            st.markdown(f"<div style='text-align:center'>Page {curr_page} of {total_pages}</div>", unsafe_allow_html=True)
+        with pc3:
+            if st.button("Next ➡️", disabled=(curr_page == total_pages), key="next_search"):
+                st.session_state.notion_search_page += 1
+                st.rerun()
+
+    if st.session_state.get("notion_action_type"):
+        _render_action_modals()
+
+def render_notion_trash():
+    """Trash section for archived pages with multi-selection support."""
+    st.markdown("### 🗑️ Trash System")
+    st.caption("Manage archived pages. Select multiple items to restore or delete permanently.")
+    
+    hidden_ids = _notion_hidden_page_ids()
+    if "notion_trash_items" not in st.session_state or st.button("🔄 Refresh Trash", key="ref_trash"):
+        with st.spinner("Fetching trash..."):
+            from notion.notion_handler import get_existing_pages
+            res = get_existing_pages()
+            st.session_state.notion_trash_items = [
+                p for p in res.get("pages", [])
+                if p.get("archived") and p.get("id") not in hidden_ids
+            ]
+    
+    trash_items = st.session_state.notion_trash_items
+    if not trash_items:
+        st.success("✨ Your Trash is empty!")
+        return
+        
+    # Multi-selection state
+    if "notion_trash_selected_ids" not in st.session_state:
+        st.session_state.notion_trash_selected_ids = set()
+        
+    # Header Buttons: Select All / Deselect All
+    tc1, tc2, _ = st.columns([1, 1, 4])
+    with tc1:
+        if st.button("☑️ Select All", use_container_width=True, key="sel_all_trash"):
+            st.session_state.notion_trash_selected_ids = {p['id'] for p in trash_items}
+            st.rerun()
+    with tc2:
+        if st.button("🔲 Deselect All", use_container_width=True, key="desel_all_trash"):
+            st.session_state.notion_trash_selected_ids = set()
+            st.rerun()
+            
+    st.divider()
+    
+    # Table Header
+    h_cols = st.columns([0.4, 0.4, 3, 2.5, 2.5])
+    for col, h in zip(h_cols, ["", "#", "Page Name", "Trashed Date", "Snippet"]):
+        col.markdown(f"**{h}**")
+    st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #333'>", unsafe_allow_html=True)
+    
+    selected_ids = st.session_state.notion_trash_selected_ids
+    
+    for i, item in enumerate(trash_items):
+        is_selected = item['id'] in selected_ids
+        r_cols = st.columns([0.4, 0.4, 3, 2.5, 2.5])
+        
+        with r_cols[0]:
+            if st.checkbox("", value=is_selected, key=f"trash_sel_{item['id']}"):
+                if item['id'] not in selected_ids:
+                    st.session_state.notion_trash_selected_ids.add(item['id'])
+                    st.rerun()
+            else:
+                if item['id'] in selected_ids:
+                    st.session_state.notion_trash_selected_ids.remove(item['id'])
+                    st.rerun()
+                    
+        with r_cols[1]: st.write(f"{i+1}")
+        with r_cols[2]: st.markdown(f"**{item['title']}**")
+        with r_cols[3]: 
+            dt = item['last_edited_time'].replace("T", " ").split(".")[0]
+            st.caption(dt)
+        with r_cols[4]:
+            st.caption(get_page_preview(item['id']))
+            
+        if i < len(trash_items) - 1:
+            st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #222'>", unsafe_allow_html=True)
+
+    # Bottom Action Bar
+    if selected_ids:
+        st.markdown("<br>", unsafe_allow_html=True)
+        count = len(selected_ids)
+        st.markdown(f"**Selected: {count} item(s)**")
+        
+        ba1, ba2 = st.columns(2)
+        with ba1:
+            # Purple Gradient Restore Button
+            if st.button(f"♻️ Restore {count} Item(s)", key="bulk_restore", use_container_width=True):
+                from notion.notion_handler import archive_notion_page
+                with st.spinner(f"Restoring {count} pages..."):
+                    for pid in selected_ids:
+                        archive_notion_page(pid, archive=False)
+                    st.success(f"Successfully restored {count} pages!")
+                    st.session_state.notion_trash_selected_ids = set()
+                    _clear_notion_page_cache()
+                    st.rerun()
+        with ba2:
+            # Red Gradient Delete Button
+            if st.button(f"🔥 Delete Forever", key="bulk_delete", use_container_width=True):
+                st.session_state.notion_trash_action = "bulk_delete_confirm"
+                st.rerun()
+
+    if st.session_state.get("notion_trash_action") == "bulk_delete_confirm":
+        _render_bulk_trash_modal()
+
+def _render_bulk_trash_modal():
+    selected_ids = st.session_state.notion_trash_selected_ids
+    count = len(selected_ids)
+    
+    import streamlit.components.v1 as _components
+    _components.html(f"""
+<script>
+(function() {{
+  var doc = window.parent.document;
+  if (doc.getElementById('notion-bulk-overlay')) return;
+
+  var overlay = doc.createElement('div');
+  overlay.id = 'notion-bulk-overlay';
+  overlay.style.cssText = [
+    'position:fixed','top:0','left:0','width:100%','height:100%',
+    'background:rgba(0,0,0,0.75)','z-index:999999',
+    'display:flex','align-items:center','justify-content:center',
+    'backdrop-filter:blur(5px)','-webkit-backdrop-filter:blur(5px)'
+  ].join(';');
+
+  var card = doc.createElement('div');
+  card.style.cssText = [
+    'background:#121212','border:1px solid #ff4444','border-radius:16px',
+    'padding:40px','text-align:center','min-width:360px','max-width:440px',
+    'box-shadow:0 0 50px rgba(239,68,68,0.2)','font-family:Inter,sans-serif'
+  ].join(';');
+
+  card.innerHTML = `
+    <div style="font-size:48px;color:#ef4444;margin-bottom:15px">⚠️</div>
+    <h2 style="color:white;margin:0 0 10px;font-size:22px;font-weight:700">Delete Permanently?</h2>
+    <p style="color:#aaa;font-size:14px;margin:0 0 30px;line-height:1.5">
+      You are about to permanently delete <b>{count} item(s)</b>.<br>This action cannot be undone.
+    </p>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <button id="bulk-cancel" style="
+        background:#2d2d2d;color:white;border:none;border-radius:8px;
+        padding:12px;font-size:15px;font-weight:600;cursor:pointer">
+        Cancel
+      </button>
+      <button id="bulk-delete" style="
+        background:linear-gradient(135deg,#ef4444,#dc2626);color:white;
+        border:none;border-radius:8px;padding:12px;font-size:15px;
+        font-weight:600;cursor:pointer">
+        Yes, Delete Forever
+      </button>
+    </div>
+  `;
+
+  overlay.appendChild(card);
+  doc.body.appendChild(overlay);
+
+  doc.getElementById('bulk-cancel').onclick = function() {{
+    overlay.remove();
+    var btns = doc.querySelectorAll('button');
+    for (var b of btns) {{ if (b.innerText.trim() === 'Close Bulk') {{ b.click(); break; }} }}
+  }};
+  doc.getElementById('bulk-delete').onclick = function() {{
+    overlay.remove();
+    var btns = doc.querySelectorAll('button');
+    for (var b of btns) {{ if (b.innerText.trim() === 'Confirm Bulk Delete') {{ b.click(); break; }} }}
+  }};
+}})();
+</script>
+""", height=0, width=0)
+
+    # Hidden Streamlit buttons
+    if st.button("Close Bulk", key="close_bulk_btn"):
+        st.session_state.notion_trash_action = None
+        st.rerun()
+    if st.button("Confirm Bulk Delete", key="confirm_bulk_btn"):
+        from notion.notion_handler import delete_notion_page_permanent
+        with st.spinner(f"Deleting {count} pages..."):
+            for pid in selected_ids:
+                delete_notion_page_permanent(pid)
+                if "notion_permanent_deleted_ids" not in st.session_state:
+                    st.session_state.notion_permanent_deleted_ids = []
+                st.session_state.notion_permanent_deleted_ids.append(pid)
+        st.success(f"Successfully deleted {count} items.")
+        st.session_state.notion_trash_selected_ids = set()
+        st.session_state.notion_trash_action = None
+        _clear_notion_page_cache()
+        st.rerun()
+
+def _render_action_modals():
+    item = st.session_state.notion_action_target
+    action = st.session_state.notion_action_type
+    
+    if action == "rename":
+        st.subheader(f"✏️ Rename: {item['title']}")
+        new_t = st.text_input("New Title", value=item['title'])
+        c1, c2 = st.columns(2)
+        if c1.button("Save", use_container_width=True):
+            from notion.notion_handler import update_page_title
+            update_page_title(item['id'], new_t)
+            _clear_notion_page_cache()
+            st.session_state.notion_action_type = None; st.rerun()
+        if c2.button("Cancel", use_container_width=True):
+            st.session_state.notion_action_type = None; st.rerun()
+
+    elif action == "duplicate_confirm":
+        st.warning(f"Duplicate '{item['title']}'?")
+        if st.button("Yes, Duplicate", use_container_width=True):
+            from notion.notion_handler import duplicate_notion_page
+            duplicate_notion_page(item['id'])
+            _clear_notion_page_cache()
+            st.session_state.notion_action_type = None; st.rerun()
+        if st.button("Cancel", use_container_width=True):
+            st.session_state.notion_action_type = None; st.rerun()
+
+    elif action == "delete_choice":
+        import streamlit.components.v1 as _components
+        _components.html(f"""
+<script>
+(function() {{
+  var doc = window.parent.document;
+  if (doc.getElementById('notion-premium-modal')) return;
+
+  var overlay = doc.createElement('div');
+  overlay.id = 'notion-premium-modal';
+  overlay.style.cssText = [
+    'position:fixed','top:0','left:0','width:100%','height:100%',
+    'background:rgba(0,0,0,0.7)','z-index:999999',
+    'display:flex','align-items:center','justify-content:center',
+    'backdrop-filter:blur(10px)','-webkit-backdrop-filter:blur(10px)'
+  ].join(';');
+
+  var card = doc.createElement('div');
+  card.style.cssText = [
+    'background:#161625','border:1px solid rgba(255,255,255,0.1)',
+    'border-radius:24px','padding:40px','text-align:center',
+    'min-width:380px','max-width:440px','box-shadow:0 30px 80px rgba(0,0,0,0.8)',
+    'font-family:Inter,sans-serif','color:white'
+  ].join(';');
+
+  card.innerHTML = `
+    <div style="font-size:54px;margin-bottom:20px;color:#ff4d8d">❓</div>
+    <h2 style="margin:0 0 10px;font-size:24px;font-weight:700;letter-spacing:-0.5px">Delete this page?</h2>
+    <p style="color:#94a3b8;font-size:15px;margin:0 0 35px;line-height:1.6">
+      Do you want to move <b>{item['title']}</b> to trash or delete it permanently?
+    </p>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <button id="modal-keep" style="
+        background:#334155;color:white;border:none;border-radius:12px;
+        padding:14px;font-size:15px;font-weight:600;cursor:pointer">
+        Cancel
+      </button>
+      <button id="modal-trash" style="
+        background:linear-gradient(135deg,#6366f1,#8b5cf6);color:white;
+        border:none;border-radius:12px;padding:14px;font-size:15px;
+        font-weight:600;cursor:pointer;box-shadow:0 10px 20px rgba(99,102,241,0.2)">
+        Move to Trash
+      </button>
+      <button id="modal-delete" style="
+        background:linear-gradient(135deg,#ef4444,#f43f5e);color:white;
+        border:none;border-radius:12px;padding:14px;font-size:15px;
+        font-weight:600;cursor:pointer;box-shadow:0 10px 20px rgba(239,68,68,0.2)">
+        Delete Permanently
+      </button>
+    </div>
+  `;
+
+  overlay.appendChild(card);
+  doc.body.appendChild(overlay);
+
+  doc.getElementById('modal-keep').onclick = function() {{
+    overlay.remove();
+    var btns = doc.querySelectorAll('button');
+    for (var b of btns) {{ if (b.innerText.trim() === '🔙 Back') {{ b.click(); break; }} }}
+  }};
+  doc.getElementById('modal-trash').onclick = function() {{
+    overlay.remove();
+    var btns = doc.querySelectorAll('button');
+    for (var b of btns) {{ if (b.innerText.trim() === '🗑️ Trash It') {{ b.click(); break; }} }}
+  }};
+  doc.getElementById('modal-delete').onclick = function() {{
+    overlay.remove();
+    var btns = doc.querySelectorAll('button');
+    for (var b of btns) {{ if (b.innerText.trim() === '🔥 Delete Now') {{ b.click(); break; }} }}
+  }};
+}})();
+</script>
+""", height=0, width=0)
+        if st.button("🔙 Back", key="h_cancel"): st.session_state.notion_action_type = None; st.rerun()
+        if st.button("🗑️ Trash It", key="h_trash"):
+            from notion.notion_handler import archive_notion_page
+            archive_notion_page(item['id'], archive=True)
+            _clear_notion_page_cache()
+            st.session_state.notion_action_type = None; st.success("Moved to Trash"); st.rerun()
+        if st.button("🔥 Delete Now", key="h_delete"):
+            from notion.notion_handler import delete_notion_page_permanent
+            delete_notion_page_permanent(item['id'])
+            if "notion_permanent_deleted_ids" not in st.session_state:
+                st.session_state.notion_permanent_deleted_ids = []
+            st.session_state.notion_permanent_deleted_ids.append(item['id'])
+            _clear_notion_page_cache()
+            st.session_state.notion_action_type = None; st.success("Permanently Deleted"); st.rerun()
+
+    elif action == "edit_page":
+        target = st.session_state.notion_edit_target
+        st.subheader(f"📝 Editing: {target['title']}")
+        new_content = st.text_area("Content", value=st.session_state.notion_edit_content, height=400)
+        ec1, ec2 = st.columns(2)
+        if ec1.button("Save Changes", use_container_width=True):
+            from notion.notion_handler import update_page_content
+            update_page_content(target['id'], new_content)
+            _clear_notion_page_cache()
+            st.session_state.notion_action_type = None; st.success("Changes Saved!"); st.rerun()
+        if ec2.button("Discard", use_container_width=True):
+            st.session_state.notion_action_type = None; st.rerun()
