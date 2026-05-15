@@ -526,14 +526,17 @@ def render_notion_listing():
                     st.session_state.notion_action_type = "rename"
                     st.rerun()
                 if st.button("⭐ Favorite", key=f"l_f_{item['id']}", use_container_width=True):
-                    st.toast("Added to Favorites!")
+                    st.session_state.notion_toast_message = "Page sent to fav."
+                    st.rerun()
                 if st.button("📋 Duplicate", key=f"l_d_{item['id']}", use_container_width=True):
-                    st.session_state.notion_action_target = item
-                    st.session_state.notion_action_type = "duplicate_confirm"
+                    from notion.notion_handler import duplicate_notion_page
+                    duplicate_notion_page(item['id'])
+                    _clear_notion_page_cache()
+                    st.session_state.notion_toast_message = "Page is duplicated"
                     st.rerun()
                 if st.button("🔗 Copy Link", key=f"l_c_{item['id']}", use_container_width=True):
-                    st.code(item['url'])
-                    st.toast("Link ready to copy!")
+                    st.session_state.notion_toast_message = "Link copied"
+                    st.rerun()
                 if st.button("🗑️ Delete", key=f"l_del_{item['id']}", use_container_width=True):
                     st.session_state.notion_action_target = item
                     st.session_state.notion_action_type = "delete_choice"
@@ -547,28 +550,7 @@ def render_notion_listing():
 
     st.caption(f"Showing {start_idx+1}-{end_idx} of {total_items} items (Page {st.session_state.notion_listing_page}/{total_pages})")
 
-    # Pagination Controls
-    if total_pages > 1:
-        st.divider()
-        p_col1, p_col2, p_col3, p_col4, p_col5 = st.columns([1, 1, 2, 1, 1])
-        with p_col1:
-            if st.button("⏪ First", disabled=(st.session_state.notion_listing_page == 1), use_container_width=True):
-                st.session_state.notion_listing_page = 1
-                st.rerun()
-        with p_col2:
-            if st.button("⬅️ Prev", disabled=(st.session_state.notion_listing_page == 1), use_container_width=True):
-                st.session_state.notion_listing_page -= 1
-                st.rerun()
-        with p_col3:
-            st.markdown(f"<div style='text-align:center; font-weight:600; padding: 5px;'>Page {st.session_state.notion_listing_page} of {total_pages}</div>", unsafe_allow_html=True)
-        with p_col4:
-            if st.button("Next ➡️", disabled=(st.session_state.notion_listing_page == total_pages), use_container_width=True):
-                st.session_state.notion_listing_page += 1
-                st.rerun()
-        with p_col5:
-            if st.button("Last ⏩", disabled=(st.session_state.notion_listing_page == total_pages), use_container_width=True):
-                st.session_state.notion_listing_page = total_pages
-                st.rerun()
+    _render_pagination("notion_listing_page", total_items)
 
 
 
@@ -595,11 +577,60 @@ def _render_view_overlay():
             {preview if preview else "*(No content or could not fetch)*"}
         </div>
         """, unsafe_allow_html=True)
-        
         st.markdown(f"[Open in Notion ↗](https://www.notion.so/{page_id.replace('-', '')})")
 
 
 def render_notion_workflow():
+    # ── Toast Notifications (JS Injection) ───────────────────────────────────
+    if st.session_state.get("notion_toast_message"):
+        msg = st.session_state.notion_toast_message
+        import streamlit.components.v1 as _components
+        _components.html(f"""
+<script>
+(function() {{
+  function getTopDoc() {{
+    try {{
+      var d = window;
+      while (d !== d.parent && d.parent.document) {{ d = d.parent; }}
+      return d.document;
+    }} catch(e) {{ return window.parent.document; }}
+  }}
+  var doc = getTopDoc();
+  var container = doc.getElementById('notion-toast-container');
+  if (!container) {{
+    container = doc.createElement('div');
+    container.id = 'notion-toast-container';
+    container.style.cssText = 'position:fixed;top:30px;right:30px;z-index:999999999;display:flex;flex-direction:column;gap:10px;pointer-events:none;';
+    doc.body.appendChild(container);
+  }}
+  
+  var toast = doc.createElement('div');
+  toast.style.cssText = [
+    'background:#00c853','color:white','padding:14px 28px','border-radius:12px',
+    'font-family:"Inter",sans-serif','font-weight:600','font-size:15px',
+    'box-shadow:0 10px 30px rgba(0,200,83,0.3)','display:flex','align-items:center',
+    'gap:12px','pointer-events:auto','transition:all 0.4s cubic-bezier(0.68, -0.55, 0.265, 1.55)',
+    'transform:translateX(150%)','opacity:0'
+  ].join(';');
+  
+  toast.innerHTML = '<span style="font-size:20px">✅</span> ' + "{msg}";
+  container.appendChild(toast);
+
+  setTimeout(() => {{ 
+    toast.style.transform = 'translateX(0)'; 
+    toast.style.opacity = '1';
+  }}, 100);
+
+  setTimeout(() => {{
+    toast.style.transform = 'translateX(150%)';
+    toast.style.opacity = '0';
+    setTimeout(() => {{ toast.remove(); }}, 500);
+  }}, 3500);
+}})();
+</script>
+""", height=1, scrolling=False)
+        del st.session_state.notion_toast_message
+
     st.markdown('<div class="page-title">📝 Notion AI Agent</div>', unsafe_allow_html=True)
 
     # OAuth callback
@@ -669,14 +700,14 @@ def render_notion_workflow():
         else:
             render_notion_trash()
 
+
     # ── Agent tab ──────────────────────────────────────────────────────────────
     with tab_agent:
         if not is_notion_authenticated():
             st.warning("⚠️ Connect your Notion account in Settings first.")
-            return
-
-        _init_state()
-        version = st.session_state.notion_form_version
+        else:
+            _init_state()
+            version = st.session_state.notion_form_version
 
 
 
@@ -1290,7 +1321,35 @@ def render_notion_workflow():
                     _reset_form()
                     st.rerun()
 
-        _render_history()
+    _render_history()
+
+def _render_pagination(current_page_key, total_items, items_per_page=10):
+    total_pages = (total_items + items_per_page - 1) // items_per_page
+    if total_pages <= 1: return
+    
+    curr_page = st.session_state.get(current_page_key, 1)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    p_col1, p_col2, p_col3, p_col4, p_col5 = st.columns([1, 1, 2, 1, 1])
+    
+    with p_col1:
+        if st.button("⏮️ First", disabled=(curr_page == 1), key=f"first_{current_page_key}", use_container_width=True):
+            st.session_state[current_page_key] = 1
+            st.rerun()
+    with p_col2:
+        if st.button("⬅️ Prev", disabled=(curr_page == 1), key=f"prev_{current_page_key}", use_container_width=True):
+            st.session_state[current_page_key] -= 1
+            st.rerun()
+    with p_col3:
+        st.markdown(f"<div style='text-align:center; font-weight:600; padding:5px; background:rgba(255,255,255,0.05); border-radius:8px;'>Page {curr_page} of {total_pages}</div>", unsafe_allow_html=True)
+    with p_col4:
+        if st.button("Next ➡️", disabled=(curr_page == total_pages), key=f"next_{current_page_key}", use_container_width=True):
+            st.session_state[current_page_key] += 1
+            st.rerun()
+    with p_col5:
+        if st.button("Last ⏭️", disabled=(curr_page == total_pages), key=f"last_{current_page_key}", use_container_width=True):
+            st.session_state[current_page_key] = total_pages
+            st.rerun()
 
     # Global Modal Overlays
     if st.session_state.get("notion_viewing_id"):
@@ -1423,14 +1482,17 @@ def render_notion_search():
                     st.session_state.notion_action_type = "rename"
                     st.rerun()
                 if st.button("⭐ Favorite", key=f"s_f_{item['id']}", use_container_width=True):
-                    st.toast("Added to Favorites!")
+                    st.session_state.notion_toast_message = "Page sent to fav."
+                    st.rerun()
                 if st.button("📋 Duplicate", key=f"s_d_{item['id']}", use_container_width=True):
-                    st.session_state.notion_action_target = item
-                    st.session_state.notion_action_type = "duplicate_confirm"
+                    from notion.notion_handler import duplicate_notion_page
+                    duplicate_notion_page(item['id'])
+                    _clear_notion_page_cache()
+                    st.session_state.notion_toast_message = "Page is duplicated"
                     st.rerun()
                 if st.button("🔗 Copy Link", key=f"s_c_{item['id']}", use_container_width=True):
-                    st.code(item['url'])
-                    st.toast("Link ready to copy!")
+                    st.session_state.notion_toast_message = "Link copied"
+                    st.rerun()
                 if st.button("🗑️ Delete", key=f"s_del_{item['id']}", use_container_width=True):
                     st.session_state.notion_action_target = item
                     st.session_state.notion_action_type = "delete_choice"
@@ -1439,20 +1501,7 @@ def render_notion_search():
         if i < len(page_items) - 1:
             st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #222'>", unsafe_allow_html=True)
 
-    # Pagination Controls
-    if total_pages > 1:
-        st.markdown("<br>", unsafe_allow_html=True)
-        pc1, pc2, pc3 = st.columns([1, 2, 1])
-        with pc1:
-            if st.button("⬅️ Previous", disabled=(curr_page == 1), key="prev_search"):
-                st.session_state.notion_search_page -= 1
-                st.rerun()
-        with pc2:
-            st.markdown(f"<div style='text-align:center'>Page {curr_page} of {total_pages}</div>", unsafe_allow_html=True)
-        with pc3:
-            if st.button("Next ➡️", disabled=(curr_page == total_pages), key="next_search"):
-                st.session_state.notion_search_page += 1
-                st.rerun()
+    _render_pagination("notion_search_page", total)
 
     if st.session_state.get("notion_action_type"):
         _render_action_modals()
@@ -1500,12 +1549,23 @@ def render_notion_trash():
         col.markdown(f"**{h}**")
     st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #333'>", unsafe_allow_html=True)
     
+    # Pagination for Trash
+    items_per_page = 10
+    total_trash = len(trash_items)
+    if "notion_trash_page" not in st.session_state:
+        st.session_state.notion_trash_page = 1
+        
+    start_t = (st.session_state.notion_trash_page - 1) * items_per_page
+    end_t = min(start_t + items_per_page, total_trash)
+    page_trash = trash_items[start_t:end_t]
+    
     selected_ids = st.session_state.notion_trash_selected_ids
     
-    for i, item in enumerate(trash_items):
+    for i, item in enumerate(page_trash):
         is_selected = item['id'] in selected_ids
         r_cols = st.columns([0.4, 0.4, 3, 2.5, 2.5])
         
+        actual_i = start_t + i + 1
         with r_cols[0]:
             if st.checkbox("", value=is_selected, key=f"trash_sel_{item['id']}"):
                 if item['id'] not in selected_ids:
@@ -1516,7 +1576,7 @@ def render_notion_trash():
                     st.session_state.notion_trash_selected_ids.remove(item['id'])
                     st.rerun()
                     
-        with r_cols[1]: st.write(f"{i+1}")
+        with r_cols[1]: st.write(f"{actual_i}")
         with r_cols[2]: st.markdown(f"**{item['title']}**")
         with r_cols[3]: 
             dt = item['last_edited_time'].replace("T", " ").split(".")[0]
@@ -1524,8 +1584,10 @@ def render_notion_trash():
         with r_cols[4]:
             st.caption(get_page_preview(item['id']))
             
-        if i < len(trash_items) - 1:
+        if i < len(page_trash) - 1:
             st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid #222'>", unsafe_allow_html=True)
+
+    _render_pagination("notion_trash_page", total_trash)
 
     # Bottom Action Bar
     if selected_ids:
@@ -1741,7 +1803,8 @@ def _render_action_modals():
             from notion.notion_handler import archive_notion_page
             archive_notion_page(item['id'], archive=True)
             _clear_notion_page_cache()
-            st.session_state.notion_action_type = None; st.success("Moved to Trash"); st.rerun()
+            st.session_state.notion_toast_message = "Moved to Trash"
+            st.session_state.notion_action_type = None; st.rerun()
         if st.button("🔥 Delete Now", key="h_delete"):
             from notion.notion_handler import delete_notion_page_permanent
             delete_notion_page_permanent(item['id'])
@@ -1749,7 +1812,8 @@ def _render_action_modals():
                 st.session_state.notion_permanent_deleted_ids = []
             st.session_state.notion_permanent_deleted_ids.append(item['id'])
             _clear_notion_page_cache()
-            st.session_state.notion_action_type = None; st.success("Permanently Deleted"); st.rerun()
+            st.session_state.notion_toast_message = "Permanently Deleted"
+            st.session_state.notion_action_type = None; st.rerun()
 
     elif action == "edit_page":
         target = st.session_state.notion_edit_target
