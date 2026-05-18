@@ -535,7 +535,8 @@ def render_notion_listing():
                     st.session_state.notion_toast_message = "Page is duplicated"
                     st.rerun()
                 if st.button("🔗 Copy Link", key=f"l_c_{item['id']}", use_container_width=True):
-                    st.session_state.notion_toast_message = "Link copied"
+                    st.session_state.notion_copy_url = item['url']
+                    st.session_state.notion_toast_message = "Link copied to clipboard"
                     st.rerun()
                 if st.button("🗑️ Delete", key=f"l_del_{item['id']}", use_container_width=True):
                     st.session_state.notion_action_target = item
@@ -581,9 +582,10 @@ def _render_view_overlay():
 
 
 def render_notion_workflow():
-    # ── Toast Notifications (JS Injection) ───────────────────────────────────
+    # ── Toast Notifications & Clipboard Copy (JS Injection) ──────────────────
     if st.session_state.get("notion_toast_message"):
         msg = st.session_state.notion_toast_message
+        copy_url = st.session_state.get("notion_copy_url", "")
         import streamlit.components.v1 as _components
         _components.html(f"""
 <script>
@@ -596,6 +598,28 @@ def render_notion_workflow():
     }} catch(e) {{ return window.parent.document; }}
   }}
   var doc = getTopDoc();
+  
+  // 1. Handle Clipboard Copy (Robust Textarea Hack)
+  var copyUrl = "{copy_url}";
+  if (copyUrl) {{
+    var textArea = doc.createElement("textarea");
+    textArea.value = copyUrl;
+    textArea.style.position = "fixed";
+    textArea.style.left = "-999999px";
+    textArea.style.top = "-999999px";
+    doc.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    try {{
+      doc.execCommand('copy');
+      console.log('Copying successful');
+    }} catch (err) {{
+      console.error('Unable to copy', err);
+    }}
+    doc.body.removeChild(textArea);
+  }}
+
+  // 2. Handle Toast
   var container = doc.getElementById('notion-toast-container');
   if (!container) {{
     container = doc.createElement('div');
@@ -606,11 +630,12 @@ def render_notion_workflow():
   
   var toast = doc.createElement('div');
   toast.style.cssText = [
-    'background:#00c853','color:white','padding:14px 28px','border-radius:12px',
+    'background:rgba(0,200,83,0.7)','color:white','padding:14px 28px','border-radius:12px',
     'font-family:"Inter",sans-serif','font-weight:600','font-size:15px',
-    'box-shadow:0 10px 30px rgba(0,200,83,0.3)','display:flex','align-items:center',
-    'gap:12px','pointer-events:auto','transition:all 0.4s cubic-bezier(0.68, -0.55, 0.265, 1.55)',
-    'transform:translateX(150%)','opacity:0'
+    'box-shadow:0 10px 30px rgba(0,0,0,0.2)','display:flex','align-items:center',
+    'gap:12px','pointer-events:auto','transition:all 0.5s cubic-bezier(0.19, 1, 0.22, 1)',
+    'transform:translateX(150%)','opacity:0','backdrop-filter:blur(15px)','-webkit-backdrop-filter:blur(15px)',
+    'border:1px solid rgba(255,255,255,0.1)'
   ].join(';');
   
   toast.innerHTML = '<span style="font-size:20px">✅</span> ' + "{msg}";
@@ -629,7 +654,8 @@ def render_notion_workflow():
 }})();
 </script>
 """, height=1, scrolling=False)
-        del st.session_state.notion_toast_message
+        st.session_state.notion_toast_message = None
+        st.session_state.notion_copy_url = None
 
     st.markdown('<div class="page-title">📝 Notion AI Agent</div>', unsafe_allow_html=True)
 
@@ -644,12 +670,24 @@ def render_notion_workflow():
             else:
                 st.error("❌ Failed to connect Notion.")
 
-    tab_agent, tab_listing, tab_searching, tab_trash, tab_settings = st.tabs([
-        "🤖 Create Page", "📋 Listing", "🔍 Searching", "🗑️ Trash", "⚙️ Settings"
-    ])
+    # ── Tab Navigation (Persistent) ──────────────────────────────────────────
+    if "notion_active_tab" not in st.session_state:
+        st.session_state.notion_active_tab = "Create Page"
+        
+    t_cols = st.columns([1,1,1,1,1])
+    tabs = ["🤖 Create Page", "📋 Listing", "🔍 Searching", "🗑️ Trash", "⚙️ Settings"]
+    for i, t_name in enumerate(tabs):
+        with t_cols[i]:
+            is_active = (st.session_state.notion_active_tab == t_name)
+            style = "background:linear-gradient(135deg,#6c63ff,#8b5cf6);color:white;border-radius:8px;border:none;" if is_active else "background:transparent;color:#888;border:1px solid #333;"
+            if st.button(t_name, key=f"tab_btn_{i}", use_container_width=True):
+                st.session_state.notion_active_tab = t_name
+                st.rerun()
+                
+    active_tab = st.session_state.notion_active_tab
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Settings ───────────────────────────────────────────────────────────────
-    with tab_settings:
+    if active_tab == "⚙️ Settings":
         with st.expander("📖 Setup Guide", expanded=False):
             st.markdown("""
             Go to **[Notion Developers](https://www.notion.so/my-integrations)** → Developer Portal.
@@ -679,30 +717,26 @@ def render_notion_workflow():
             else:
                 st.warning("Configure Client ID and Redirect URL first.")
 
-    # ── Listing tab ────────────────────────────────────────────────────────────
-    with tab_listing:
+    elif active_tab == "📋 Listing":
         if not is_notion_authenticated():
             st.warning("⚠️ Connect your Notion account in Settings first.")
         else:
             render_notion_listing()
 
-    # ── Searching tab ──────────────────────────────────────────────────────────
-    with tab_searching:
+    elif active_tab == "🔍 Searching":
         if not is_notion_authenticated():
             st.warning("⚠️ Connect your Notion account in Settings first.")
         else:
             render_notion_search()
 
-    # ── Trash tab ──────────────────────────────────────────────────────────────
-    with tab_trash:
+    elif active_tab == "🗑️ Trash":
         if not is_notion_authenticated():
             st.warning("⚠️ Connect your Notion account in Settings first.")
         else:
             render_notion_trash()
 
 
-    # ── Agent tab ──────────────────────────────────────────────────────────────
-    with tab_agent:
+    elif active_tab == "🤖 Create Page":
         if not is_notion_authenticated():
             st.warning("⚠️ Connect your Notion account in Settings first.")
         else:
@@ -1491,6 +1525,7 @@ def render_notion_search():
                     st.session_state.notion_toast_message = "Page is duplicated"
                     st.rerun()
                 if st.button("🔗 Copy Link", key=f"s_c_{item['id']}", use_container_width=True):
+                    st.session_state.notion_copy_url = item['url']
                     st.session_state.notion_toast_message = "Link copied"
                     st.rerun()
                 if st.button("🗑️ Delete", key=f"s_del_{item['id']}", use_container_width=True):
@@ -1514,11 +1549,11 @@ def render_notion_trash():
     hidden_ids = _notion_hidden_page_ids()
     if "notion_trash_items" not in st.session_state or st.button("🔄 Refresh Trash", key="ref_trash"):
         with st.spinner("Fetching trash..."):
-            from notion.notion_handler import get_existing_pages
-            res = get_existing_pages()
+            from notion.notion_handler import get_trashed_pages
+            trashed = get_trashed_pages()
             st.session_state.notion_trash_items = [
-                p for p in res.get("pages", [])
-                if p.get("archived") and p.get("id") not in hidden_ids
+                p for p in trashed
+                if p.get("id") not in hidden_ids
             ]
     
     trash_items = st.session_state.notion_trash_items
@@ -1599,14 +1634,21 @@ def render_notion_trash():
         with ba1:
             # Purple Gradient Restore Button
             if st.button(f"♻️ Restore {count} Item(s)", key="bulk_restore", use_container_width=True):
-                from notion.notion_handler import archive_notion_page
+                from notion.notion_handler import archive_notion_page, remove_from_trashed_pages
                 with st.spinner(f"Restoring {count} pages..."):
+                    success_count = 0
                     for pid in selected_ids:
-                        archive_notion_page(pid, archive=False)
-                    st.success(f"Successfully restored {count} pages!")
-                    st.session_state.notion_trash_selected_ids = set()
-                    _clear_notion_page_cache()
-                    st.rerun()
+                        res = archive_notion_page(pid, archive=False)
+                        if res.get("success"):
+                            remove_from_trashed_pages(pid)
+                            success_count += 1
+                        else:
+                            st.error(f"Failed to restore {pid}: {res.get('error')}")
+                    if success_count > 0:
+                        st.success(f"Successfully restored {success_count} pages!")
+                        st.session_state.notion_trash_selected_ids = set()
+                        _clear_notion_page_cache()
+                        st.rerun()
         with ba2:
             # Red Gradient Delete Button
             if st.button(f"🔥 Delete Forever", key="bulk_delete", use_container_width=True):
@@ -1686,18 +1728,25 @@ def _render_bulk_trash_modal():
         st.session_state.notion_trash_action = None
         st.rerun()
     if st.button("Confirm Bulk Delete", key="confirm_bulk_btn"):
-        from notion.notion_handler import delete_notion_page_permanent
+        from notion.notion_handler import delete_notion_page_permanent, remove_from_trashed_pages
         with st.spinner(f"Deleting {count} pages..."):
+            success_count = 0
             for pid in selected_ids:
-                delete_notion_page_permanent(pid)
-                if "notion_permanent_deleted_ids" not in st.session_state:
-                    st.session_state.notion_permanent_deleted_ids = []
-                st.session_state.notion_permanent_deleted_ids.append(pid)
-        st.success(f"Successfully deleted {count} items.")
-        st.session_state.notion_trash_selected_ids = set()
-        st.session_state.notion_trash_action = None
-        _clear_notion_page_cache()
-        st.rerun()
+                res = delete_notion_page_permanent(pid)
+                if res.get("success"):
+                    remove_from_trashed_pages(pid)
+                    if "notion_permanent_deleted_ids" not in st.session_state:
+                        st.session_state.notion_permanent_deleted_ids = []
+                    st.session_state.notion_permanent_deleted_ids.append(pid)
+                    success_count += 1
+                else:
+                    st.error(f"Failed to delete {pid}: {res.get('error')}")
+        if success_count > 0:
+            st.success(f"Successfully deleted {success_count} items.")
+            st.session_state.notion_trash_selected_ids = set()
+            st.session_state.notion_trash_action = None
+            _clear_notion_page_cache()
+            st.rerun()
 
 def _render_action_modals():
     item = st.session_state.notion_action_target
@@ -1800,19 +1849,27 @@ def _render_action_modals():
 """, height=0, width=0)
         if st.button("🔙 Back", key="h_cancel"): st.session_state.notion_action_type = None; st.rerun()
         if st.button("🗑️ Trash It", key="h_trash"):
-            from notion.notion_handler import archive_notion_page
-            archive_notion_page(item['id'], archive=True)
-            _clear_notion_page_cache()
-            st.session_state.notion_toast_message = "Moved to Trash"
+            from notion.notion_handler import archive_notion_page, add_to_trashed_pages
+            res = archive_notion_page(item['id'], archive=True)
+            if res.get("success"):
+                add_to_trashed_pages(item)
+                _clear_notion_page_cache()
+                st.session_state.notion_toast_message = "Moved to Trash"
+            else:
+                st.session_state.notion_toast_message = f"Failed: {res.get('error')}"
             st.session_state.notion_action_type = None; st.rerun()
         if st.button("🔥 Delete Now", key="h_delete"):
-            from notion.notion_handler import delete_notion_page_permanent
-            delete_notion_page_permanent(item['id'])
-            if "notion_permanent_deleted_ids" not in st.session_state:
-                st.session_state.notion_permanent_deleted_ids = []
-            st.session_state.notion_permanent_deleted_ids.append(item['id'])
-            _clear_notion_page_cache()
-            st.session_state.notion_toast_message = "Permanently Deleted"
+            from notion.notion_handler import delete_notion_page_permanent, remove_from_trashed_pages
+            res = delete_notion_page_permanent(item['id'])
+            if res.get("success"):
+                remove_from_trashed_pages(item['id'])
+                if "notion_permanent_deleted_ids" not in st.session_state:
+                    st.session_state.notion_permanent_deleted_ids = []
+                st.session_state.notion_permanent_deleted_ids.append(item['id'])
+                _clear_notion_page_cache()
+                st.session_state.notion_toast_message = "Permanently Deleted"
+            else:
+                st.session_state.notion_toast_message = f"Failed: {res.get('error')}"
             st.session_state.notion_action_type = None; st.rerun()
 
     elif action == "edit_page":

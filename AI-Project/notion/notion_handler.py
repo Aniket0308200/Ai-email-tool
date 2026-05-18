@@ -10,6 +10,8 @@ logger = logging.getLogger(__name__)
 CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "notion_credentials.json")
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "notion_config.json")
 
+TRASHED_FILE = os.path.join(os.path.dirname(__file__), "notion_trashed_items.json")
+
 def _load_config() -> Dict[str, str]:
     if os.path.exists(CONFIG_FILE):
         try:
@@ -109,14 +111,14 @@ def create_notion_page(title: str, content: Optional[str] = None, parent_id: Opt
     headers = get_notion_headers()
 
     # ── Determine parent ──────────────────────────────────────────────────────
-    if parent_id:
-        # Explicit parent requested by user
-        parent = {"page_id": parent_id}
-        parent_name = "Specified Parent Page"
-    else:
-        # Default: create as a standalone workspace-level page
-        parent = {"workspace": True}
-        parent_name = "Workspace (Top Level)"
+    if not parent_id:
+        # Default: Do not create workspace-level pages because Notion API prevents trashing them.
+        # Fall back to finding an accessible page.
+        return _create_page_with_fallback_parent(title, content, headers)
+        
+    # Explicit parent requested by user
+    parent = {"page_id": parent_id}
+    parent_name = "Specified Parent Page"
 
     # ── Build page payload ────────────────────────────────────────────────────
     data = {
@@ -136,13 +138,10 @@ def create_notion_page(title: str, content: Optional[str] = None, parent_id: Opt
                 "success": True,
                 "data": response.json(),
                 "parent_name": parent_name,
-                "parent_id": parent_id or "workspace",
+                "parent_id": parent_id,
             }
         else:
             error_msg = response.json().get("message", response.text)
-            # Workspace-level creation may be restricted on some plans — fall back to first page
-            if "parent" in error_msg.lower() or response.status_code == 400:
-                return _create_page_with_fallback_parent(title, content, headers)
             return {"success": False, "error": error_msg}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -155,8 +154,8 @@ def _create_page_with_fallback_parent(title: str, content: Optional[str], header
         return {
             "success": False,
             "error": (
-                "Could not create a workspace-level page (your Notion plan may not support it). "
-                "Please share at least one page with the integration so it can be used as a parent."
+                "Notion API requires pages to have a parent in order to be safely deleted later. "
+                "Please share at least one existing page with the Notion integration so it can be used as a default parent."
             ),
         }
 
@@ -822,15 +821,87 @@ def archive_notion_page(page_id: str, archive: bool = True) -> Dict[str, Any]:
         return {"success": False, "error": "Notion not authenticated"}
     
     headers = get_notion_headers()
-    data = {"archived": archive}
+    data = {"in_trash": archive}
     
     try:
-        response = requests.patch(f"https://api.notion.com/v1/pages/{page_id}", headers=headers, json=data)
-        if response.status_code == 200:
-            return {"success": True, "data": response.json()}
-        return {"success": False, "error": response.json().get("message", response.text)}
+        if archive:
+            # Native way to move to trash in Notion is deleting the block
+            response = requests.delete(f"https://api.notion.com/v1/blocks/{page_id}", headers=headers)
+            if response.status_code in (200, 204):
+                return {"success": True, "data": response.json() if response.content else {}}
+            
+            # Fallback to PATCH in_trash if delete fails
+            data = {"in_trash": True}
+            response = requests.patch(f"https://api.notion.com/v1/pages/{page_id}", headers=headers, json=data)
+            if response.status_code == 200:
+                return {"success": True, "data": response.json()}
+            
+            # Fallback to archived
+            if response.status_code == 400 and "in_trash" in response.text:
+                data = {"archived": True}
+                response = requests.patch(f"https://api.notion.com/v1/pages/{page_id}", headers=headers, json=data)
+                if response.status_code == 200:
+                    return {"success": True, "data": response.json()}
+            
+            error_msg = response.json().get("message", response.text)
+            if response.status_code == 400 and "workspace level pages" in error_msg:
+                return {"success": True, "data": {}, "warning": "workspace_fallback"}
+            return {"success": False, "error": error_msg}
+        else:
+            # Restore via PATCH
+            data = {"in_trash": False}
+            response = requests.patch(f"https://api.notion.com/v1/pages/{page_id}", headers=headers, json=data)
+            if response.status_code == 200:
+                return {"success": True, "data": response.json()}
+            
+            # Fallback to archived
+            if response.status_code == 400 and "in_trash" in response.text:
+                data = {"archived": False}
+                response = requests.patch(f"https://api.notion.com/v1/pages/{page_id}", headers=headers, json=data)
+                if response.status_code == 200:
+                    return {"success": True, "data": response.json()}
+                    
+            error_msg = response.json().get("message", response.text)
+            if response.status_code == 400 and "workspace level pages" in error_msg:
+                return {"success": True, "data": {}, "warning": "workspace_fallback"}
+            return {"success": False, "error": error_msg}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+def _load_trashed_items() -> list:
+    if os.path.exists(TRASHED_FILE):
+        try:
+            with open(TRASHED_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def _save_trashed_items(items: list):
+    with open(TRASHED_FILE, "w") as f:
+        json.dump(items, f, indent=4)
+
+def get_trashed_pages() -> list:
+    """Return all pages that were moved to trash via the UI."""
+    return _load_trashed_items()
+
+def add_to_trashed_pages(item: dict):
+    """Add a page to the local trash tracking."""
+    items = _load_trashed_items()
+    # Check if already exists
+    if not any(p.get("id") == item.get("id") for p in items):
+        # Ensure it is marked as archived
+        item_copy = item.copy()
+        item_copy["archived"] = True
+        items.append(item_copy)
+        _save_trashed_items(items)
+
+def remove_from_trashed_pages(page_id: str):
+    """Remove a page from local trash tracking (when restored or permanently deleted)."""
+    items = _load_trashed_items()
+    new_items = [p for p in items if p.get("id") != page_id]
+    if len(items) != len(new_items):
+        _save_trashed_items(new_items)
 
 def delete_notion_page_permanent(page_id: str) -> Dict[str, Any]:
     """
@@ -848,6 +919,10 @@ def delete_notion_page_permanent(page_id: str) -> Dict[str, Any]:
         response = requests.delete(f"https://api.notion.com/v1/blocks/{page_id}", headers=headers)
         if response.status_code in (200, 204):
             return {"success": True, "data": response.json() if response.content else {}}
+
+        # If it's already archived, it's already in the Native Trash. We can consider permanent deletion successful on our end.
+        if response.status_code == 400 and "Can't edit block that is archived" in response.text:
+            return {"success": True, "data": {}}
 
         # As a fallback for APIs that do not allow direct block delete, archive the page.
         fallback = archive_notion_page(page_id, archive=True)
